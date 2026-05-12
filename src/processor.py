@@ -3,7 +3,7 @@ import time
 import pandas as pd
 import concurrent.futures
 from typing import List
-from .utils import extract_pdf_by_chunks, call_llm, HEADER_PROMPT, ITEM_CHUNK_PROMPT, COLUMNS
+from utils import extract_pdf_by_chunks, call_llm, HEADER_PROMPT, ITEM_CHUNK_PROMPT, COLUMNS
 
 def process_single_file(file_obj):
     """
