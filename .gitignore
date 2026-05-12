@@ -1,0 +1,17 @@
+# Python các file tạm
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Môi trường ảo
+venv/
+env/
+.env
+
+# Streamlit
+.streamlit/static-assets
+.streamlit/secrets.toml
+
+# File hệ thống
+.DS_Store
+Thumbs.db
