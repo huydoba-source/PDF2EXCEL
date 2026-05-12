@@ -1,1 +1,21 @@
+# File: .streamlit/config.toml
 
+[theme]
+# Màu Decathlon Blue chính thức (Dùng cho Button, Progress Bar, Slider...)
+primaryColor = "#0082C3"
+
+# Màu nền chính của ứng dụng (Xám nhạt để dịu mắt, làm nổi bật không gian làm việc)
+backgroundColor = "#F8FAFC"
+
+# Màu nền phụ (Dùng cho sidebar, các khung hiển thị dataframe)
+secondaryBackgroundColor = "#FFFFFF"
+
+# Màu chữ (Xám đậm, dễ đọc, tránh dùng đen tuyền #000000 gây gắt)
+textColor = "#1F2937"
+
+# Font chữ: Sử dụng sans-serif hiện đại, sạch sẽ
+font = "sans serif"
+
+[server]
+# Ẩn nút "Menu" và "Deploy" mặc định của Streamlit trên góc phải để UI trông giống App nội bộ chuyên nghiệp hơn
+toolbarMode = "minimal"
