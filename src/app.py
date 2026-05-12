@@ -24,7 +24,7 @@ st.markdown(f"""
     """, unsafe_allow_html=True)
 
 def main():
-    st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/1/12/Decathlon_Logo.svg/1280px-Decathlon_Logo.svg.png", width=200)
+    st.image("https://logowik.com/content/uploads/images/decathlon-new-2024-vertical8474.logowik.com.webp", width=200)
     st.title("Data Extraction Portal")
     st.info("Efficiently process Form E documents with Llama-3 AI acceleration.")
 
