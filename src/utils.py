@@ -7,10 +7,19 @@ import os
 import pdfplumber
 import httpx
 from groq import Groq
+from dotenv import load_dotenv
+
+# --- 0. TẢI BIẾN MÔI TRƯỜNG ---
+# Hàm này sẽ tự động tìm file .env trong thư mục gốc và tải các biến vào hệ thống
+load_dotenv()
 
 # --- 1. CẤU HÌNH API KEY & CỘT DỮ LIỆU ---
-# Lời khuyên của Senior: Nên dùng file .env để chứa key thay vì dán trực tiếp vào code khi push lên GitHub.
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "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")
+# Lấy API Key từ file .env (An toàn, không còn hard-code)
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+# Cảnh báo sớm nếu quên cấu hình file .env
+if not GROQ_API_KEY:
+    raise ValueError("❌ LỖI: Không tìm thấy GROQ_API_KEY. Vui lòng kiểm tra lại file .env!")
 
 COLUMNS = [
     "Products consigned from (Exporter's business name, address, country)",
