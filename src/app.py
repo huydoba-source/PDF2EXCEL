@@ -1,3 +1,4 @@
+import gc
 import streamlit as st
 import pandas as pd
 import os
@@ -112,7 +113,7 @@ def extract_global_info(page):
     try:
         bbox_form = (290, 0, page.width, 150)
         cropped_form_page = page.crop(bbox_form)
-        cropped_img_obj = cropped_form_page.to_image(resolution=300)
+        cropped_img_obj = cropped_form_page.to_image(resolution=150)
         pil_image = cropped_img_obj.original
         
         ocr_text = pytesseract.image_to_string(pil_image)
@@ -469,17 +470,24 @@ def main():
             total_files = len(st.session_state.pdf_files)
             
             # Sử dụng ThreadPoolExecutor vì Web truyền đối tượng File Upload, không thể pickling với ProcessPoolExecutor
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                futures = {executor.submit(process_single_pdf, f): f for f in st.session_state.pdf_files}
-                for idx, future in enumerate(as_completed(futures)):
-                    result = future.result()
-                    if result["error"]: 
-                        errors.append(result["error"])
-                    else: 
-                        all_extracted_data.extend(result["data"])
-                    
-                    progress_bar.progress((idx + 1) / total_files)
-                    status_text.info(f"⏳ Đang đọc nội dung: `{result['file_name']}` ({idx + 1}/{total_files})")
+            # Đọc toàn bộ file thành byte thô
+            safe_file_list = [{"name": f.name, "bytes": f.getvalue()} for f in st.session_state.pdf_files]
+            
+            # XỬ LÝ TUẦN TỰ (Không dùng ThreadPool)
+            for idx, f_data in enumerate(safe_file_list):
+                # Xử lý trực tiếp trên luồng chính
+                result = process_single_pdf(f_data)
+                
+                if result["error"]: 
+                    errors.append(result["error"])
+                else: 
+                    all_extracted_data.extend(result["data"])
+                
+                progress_bar.progress((idx + 1) / total_files)
+                status_text.info(f"⏳ Đã xử lý xong: `{result['file_name']}` ({idx + 1}/{total_files})")
+                
+                # Ép hệ thống dọn dẹp RAM ngay lập tức sau mỗi file
+                gc.collect()
 
             st.session_state.extracted_data = all_extracted_data
             st.session_state.errors = errors
