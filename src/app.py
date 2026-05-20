@@ -228,11 +228,16 @@ def extract_table_items(pdf):
     if current_item: items.append(current_item)
     return items, global_invoice
 
-def process_single_pdf(file_obj):
+def process_single_pdf(file_data):
     extracted_data = []
-    file_name = file_obj.name
+    
+    # 1. Lấy tên và nội dung file từ dictionary thay vì object
+    file_name = file_data["name"]
+    file_bytes = file_data["bytes"]
+    
     try:
-        with pdfplumber.open(file_obj) as pdf:
+        # 2. Dùng io.BytesIO để bọc file_bytes lại giúp pdfplumber đọc được an toàn
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
             global_info = extract_global_info(pdf.pages[0])
             items, global_invoice = extract_table_items(pdf)
             
