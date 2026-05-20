@@ -415,11 +415,12 @@ def main():
             st.markdown("**2. Quá trình xử lý**")
             has_files = len(st.session_state.pdf_files) > 0
             
-            if has_files and st.session_state.extracted_data is None:
+            # ĐÃ SỬA: Chỉ cần có file là nút sẽ mở khóa (cho phép trích xuất lại nhiều lần)
+            if has_files:
                 if not st.session_state.is_processing:
                     if st.button("🚀 BẮT ĐẦU TRÍCH XUẤT", type="primary"):
                         st.session_state.is_processing = True
-                        reset_data_state()
+                        reset_data_state() # Hàm này sẽ tự động xóa sạch data cũ khi chạy
                         st.rerun()
                 else:
                     if st.button("🛑 Hủy tiến trình", type="secondary"):
