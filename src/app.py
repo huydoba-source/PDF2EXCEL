@@ -12,10 +12,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import pytesseract
 from PIL import Image
 
-# [LƯU Ý]: Code tĩnh của tesseract_cmd đã được vô hiệu hóa để có thể chạy trên Web/Docker.
-# Nếu bạn muốn test trực tiếp trên môi trường Windows local của bạn, hãy bỏ comment dòng dưới:
-# pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-
 # ==========================================
 # 1. ĐỒNG BỘ CẤU HÌNH CỘT DỮ LIỆU ĐẦU RA MỚI KỲ VỌNG
 # ==========================================
@@ -68,19 +64,16 @@ def format_to_dd_mm_yyyy(date_str):
         "july": "07", "august": "08", "september": "09", "october": "10", "november": "11", "december": "12"
     }
     
-    # 1. Định dạng dạng số: DD/MM/YYYY hoặc DD-MM-YYYY
     match = re.search(r'(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})', date_str)
     if match:
         d, m, y = match.group(1), match.group(2), match.group(3)
         return f"{int(d):02d}-{int(m):02d}-{y}"
         
-    # 2. Định dạng dạng số ngược: YYYY/MM/DD hoặc YYYY-MM-DD
     match = re.search(r'(\d{4})[\/\-\.](\d{1,2})[\/\-\.](\d{1,2})', date_str)
     if match:
         y, m, d = match.group(1), match.group(2), match.group(3)
         return f"{int(d):02d}-{int(m):02d}-{y}"
 
-    # 3. Định dạng chữ-số hỗn hợp: DD-MMM-YYYY hoặc DD MMM YYYY (VD: 14-OCT-2025, 21 April 2026)
     match = re.search(r'(\d{1,2})\s*[\-\s]\s*([A-Za-z]+)\s*[\-\s]\s*(\d{4})', date_str)
     if match:
         d, m_str, y = match.group(1), match.group(2).lower(), match.group(3)
@@ -286,19 +279,27 @@ def process_single_pdf(file_data):
             box_13_str = ", ".join(box_13_list)
             
             # ==========================================
-            # THAY ĐỔI 3: LOGIC TRÍCH XUẤT VÀ LÀM SẠCH "THIRD PARTY" SANG DẠNG CỘT
+            # SỬA LỖI CHÍNH: LÀM SẠCH TRIỆT ĐỂ DATA THIRD PARTY TRÊN MỌI CỘT BỊ ẢNH HƯỞNG
             # ==========================================
             third_party_column_val = ""
             for item in items:
                 desc_text = item["desc"].strip()
                 match = re.search(r'(?i)(Third\s+Party)', desc_text)
                 if match:
-                    # Trích xuất toàn bộ chuỗi Third Party từ điểm tìm thấy
+                    # 1. Tách trích xuất giữ lại duy nhất giá trị Box 7 cho cột Third Party
                     raw_tp = desc_text[match.start():].strip()
-                    # Loại bỏ phần TOTAL hoặc số tiền nếu bị dính vào do cấu trúc liền kề
                     third_party_column_val = re.split(r'(?i)TOTAL|USD|MYR|EUR', raw_tp)[0].strip()
-                    # Làm sạch mô tả của mặt hàng đó (Xóa phần text Third Party đi)
+                    
+                    # 2. Xóa sạch dấu vết Third party dính ở Box 7 (Mô tả hàng hóa)
                     item["desc"] = desc_text[:match.start()].strip()
+                    
+                    # 3. FIX: Xóa sạch hoàn toàn text Third Party dính nhầm ở cột Origin Criteria (Box 8)
+                    if item["origin"]:
+                        item["origin"] = re.split(r'(?i)Third|DESIPRO|TOTAL', item["origin"])[0].strip()
+                        
+                    # 4. FIX: Xóa sạch hoàn toàn text Third Party dính nhầm ở cột Gross weight... (Box 9)
+                    if item["weight_value"]:
+                        item["weight_value"] = re.split(r'(?i)Third|DESIPRO', item["weight_value"])[0].strip()
                     break
 
             # Xử lý dồn các dòng CONTINUATION vào item thật liền trước
@@ -316,20 +317,17 @@ def process_single_pdf(file_data):
             
             for item in final_items:
                 desc = clean_text(item["desc"])
+                origin_criteria_cleaned = clean_text(item["origin"])
                 invoice = clean_text(item["invoice"]) if item["invoice"] else global_invoice
                 weight_value_text = clean_text(item["weight_value"])
                 
-                # ==========================================
-                # THAY ĐỔI 2: TÁCH DỮ LIỆU BOX 10 (Invoice Number & Date of invoices)
-                # ==========================================
+                # TÁCH DỮ LIỆU BOX 10 (Invoice Number & Date of invoices)
                 invoice_number = ""
                 invoice_date = ""
                 if invoice:
-                    # Tìm chuỗi ngày tháng dạng số bằng Regex
                     date_match = re.search(r'(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{4})', invoice)
                     if date_match:
                         raw_inv_date = date_match.group(1)
-                        # Chuẩn hóa ngày hóa đơn về chuẩn chung Date - Month - Year
                         invoice_date = format_to_dd_mm_yyyy(raw_inv_date)
                         invoice_number = invoice.replace(raw_inv_date, "").strip()
                     else:
@@ -337,23 +335,17 @@ def process_single_pdf(file_data):
                 
                 carton, eng_desc, qty, uom, import_hs, export_hs, orig_co, issue_date, auth = parse_description_fields(desc)
                 
-                # ==========================================
-                # THAY ĐỔI 4: CHUYỂN ĐỔI ĐỊNH DẠNG NGÀY THÁNG ĐỒNG BỘ (DD-MM-YYYY)
-                # ==========================================
+                # CHUYỂN ĐỔI ĐỊNH DẠNG NGÀY THÁNG ĐỒNG BỘ (DD-MM-YYYY)
                 issue_date = format_to_dd_mm_yyyy(issue_date)
                 
-                # ==========================================
-                # FIX BẢN VÁ LỖI TÊN BIẾN (qty & uom thay cho pce)
-                # ==========================================
+                # BẢN VÁ LỖI TÊN BIẾN (qty & uom thay cho pce)
                 if not qty:
                     qty_fallback = re.search(r'([\d,\.]+)\s*(PCE|PR|SET|KGS)\b', weight_value_text, re.IGNORECASE)
                     if qty_fallback:
                         qty = qty_fallback.group(1).strip()
                         uom = qty_fallback.group(2).strip().upper()
                 
-                # ==========================================
-                # THAY ĐỔI 5: CHỈ LẤY ĐÚNG GIÁ TRỊ USD TẠI BOX 9
-                # ==========================================
+                # CHỈ LẤY ĐÚNG GIÁ TRỊ USD TẠI BOX 9
                 usd_match = re.search(r'USD\s*([\d,\.]+)', weight_value_text, re.IGNORECASE)
                 usd = usd_match.group(1).strip() if usd_match else ""
                 
@@ -361,7 +353,7 @@ def process_single_pdf(file_data):
                     usd_match_desc = re.search(r'USD\s*([\d,\.]+)', desc, re.IGNORECASE)
                     usd = usd_match_desc.group(1).strip() if usd_match_desc else ""
                 
-                # Làm sạch chuỗi Box 9 hiển thị (Chỉ lọc giữ lại thông tin USD)
+                # Làm sạch chuỗi Box 9 hiển thị (Chỉ lọc giữ lại thông tin USD, xóa MYR, EUR,...)
                 weight_value_cleaned = weight_value_text
                 weight_value_cleaned = re.sub(r'\b(MYR|EUR|SGD|VND)\s*[\d,\.]+', '', weight_value_cleaned, flags=re.IGNORECASE)
                 weight_value_cleaned = re.sub(r'\s+', ' ', weight_value_cleaned).strip()
@@ -370,7 +362,7 @@ def process_single_pdf(file_data):
                 if item_no_val.upper() == "CONTINUATION":
                     item_no_val = ""
                 
-                # Sắp xếp và map chuẩn xác vào Dictionary đầu ra khớp 100% với mảng COLUMNS
+                # Sắp xếp và map chuẩn xác dữ liệu đầu ra
                 extracted_data.append({
                     COLUMNS[0]: global_info["exporter"],
                     COLUMNS[1]: global_info["consignee"],
@@ -379,8 +371,8 @@ def process_single_pdf(file_data):
                     COLUMNS[4]: item_no_val,
                     COLUMNS[5]: clean_text(item["marks"]),
                     COLUMNS[6]: desc,
-                    COLUMNS[7]: clean_text(item["origin"]),
-                    COLUMNS[8]: weight_value_cleaned,
+                    COLUMNS[7]: origin_criteria_cleaned, # Đã làm sạch hoàn toàn text dính từ third party
+                    COLUMNS[8]: weight_value_cleaned,     # Đã làm sạch hoàn toàn text dính từ third party
                     COLUMNS[9]: invoice,
                     COLUMNS[10]: invoice_number,      
                     COLUMNS[11]: invoice_date,        
