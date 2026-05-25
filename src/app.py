@@ -17,7 +17,7 @@ from PIL import Image
 # pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
 # ==========================================
-# 1. CẤU HÌNH CỘT DỮ LIỆU & THEME
+# 1. CẤU HÌNH CỘT DỮ LIỆU & THEME (ĐÃ CẬP NHẬT THEO EXCEL & AUDIO)
 # ==========================================
 COLUMNS = [
     "Products consigned from (Exporter's business name, address, country)",
@@ -29,21 +29,25 @@ COLUMNS = [
     "Number and type of packages, description of products",
     "Origin criteria (see Overleaf Notes)",
     "Gross weight or net weight or other quantity, and value",
-    "Number, date of Invoices",
-    "Movement Certificate",
-    "Third Party Invoicing",
+    "Invoice Number",            # Tách từ Box 10
+    "Date of invoices",          # Tách từ Box 10
+    "Movement Certificate",      
+    "Third Party Invoicing",     
     "CARTON",
-    "PCE",
+    "English description",       # Cột mới bổ sung
     "IMPORTING COUNTRY HS CODE",
     "EXPORTING COUNTRY HS CODE",
     "Original CO Reference Number",
     "Issuance Date",
     "Issuing Authority",
+    "Quantity",                  # Cột mới bổ sung (Tách từ PCE cũ)
+    "UOM",                       # Cột mới bổ sung (Tách từ PCE cũ)
     "produced in",
     "exported to",
     "Date of certification",
     "Form", 
     "USD",  
+    "Third party"                # Cột mới (Thay thế cho dòng tách biệt)
 ]
 
 DECATHLON_BLUE = "#0082C3"
@@ -62,6 +66,17 @@ def clean_text(text):
     if not re.search(r'[A-Za-z0-9]', text):
         return ""
     return text.strip()
+
+# --- HÀM CHUYỂN ĐỔI CHUẨN NGÀY THÁNG ---
+def format_to_dd_mmm_yyyy(date_str):
+    if not date_str: return ""
+    date_str = clean_text(date_str)
+    try:
+        # Tự động parse hầu hết các format và chuyển về chuẩn DD-MMM-YYYY
+        parsed = pd.to_datetime(date_str, dayfirst=True)
+        return parsed.strftime('%d-%b-%Y').upper()
+    except:
+        return date_str
 
 def extract_global_info(page):
     bbox_exporter = (30, 40, 290, 130)  
@@ -121,7 +136,6 @@ def extract_global_info(page):
         if form_match:
             form_type = form_match.group(1).strip().upper()
     except Exception as e:
-        print(f"[!] Cảnh báo OCR: Xảy ra lỗi khi đọc Form Type - {e}")
         form_type = "" 
 
     return {
@@ -137,15 +151,29 @@ def parse_description_fields(desc_text):
     carton_match = re.search(r'([\d,\.]+)\s*CARTON', text, re.IGNORECASE)
     carton = carton_match.group(1).strip() if carton_match else ""
     
-    pce = ""
+    english_desc = ""
+    quantity = ""
+    uom = ""
+    
+    # Bóc tách English desc, Quantity, UOM
     pce_area = re.search(r'CARTON(.*?)IMPORTING', text, re.IGNORECASE)
     if pce_area:
         sub_text = pce_area.group(1).strip()
-        pce_match = re.search(r'(.*?)\s*PCE', sub_text, re.IGNORECASE)
-        pce = pce_match.group(1).strip() if pce_match else sub_text
+        m = re.search(r'^(.*?)[-\s]*([\d,\.]+)\s+([^0-9]+)$', sub_text)
+        if m:
+            english_desc = m.group(1).strip()
+            if english_desc.endswith('-'): english_desc = english_desc[:-1].strip()
+            quantity = m.group(2).strip()
+            uom = m.group(3).strip()
+        else:
+            english_desc = sub_text
     else:
-        pce_match = re.search(r'([\d,\.]+)\s*PCE', text, re.IGNORECASE)
-        pce = pce_match.group(1).strip() if pce_match else ""
+        m = re.search(r'CARTON(.*?)[-\s]*([\d,\.]+)\s+([^0-9]+)$', text, re.IGNORECASE)
+        if m:
+            english_desc = m.group(1).strip()
+            if english_desc.endswith('-'): english_desc = english_desc[:-1].strip()
+            quantity = m.group(2).strip()
+            uom = m.group(3).strip()
         
     import_hs_match = re.search(r'IMPORTING COUNTRY HS CODE\s*[:\-]?\s*([A-Za-z0-9\.]+)', text, re.IGNORECASE)
     import_hs = import_hs_match.group(1).strip() if import_hs_match else ""
@@ -162,7 +190,7 @@ def parse_description_fields(desc_text):
     auth_match = re.search(r'Issuing Authority\s*:\s*(.*?)(?=TOTAL|Page|$)', text, re.IGNORECASE)
     auth = auth_match.group(1).strip() if auth_match else ""
     
-    return carton, pce, import_hs, export_hs, orig_co, issue_date, auth
+    return carton, english_desc, quantity, uom, import_hs, export_hs, orig_co, issue_date, auth
 
 def extract_table_items(pdf):
     items = []
@@ -231,17 +259,16 @@ def extract_table_items(pdf):
 def process_single_pdf(file_data):
     extracted_data = []
     
-    # 1. Lấy tên và nội dung file từ dictionary thay vì object
     file_name = file_data["name"]
     file_bytes = file_data["bytes"]
     
     try:
-        # 2. Dùng io.BytesIO để bọc file_bytes lại giúp pdfplumber đọc được an toàn
         with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
             global_info = extract_global_info(pdf.pages[0])
             items, global_invoice = extract_table_items(pdf)
             
             if items:
+                # 1. Cắt đoạn Text Bleeding
                 for i in range(1, len(items)):
                     desc_text = items[i]["desc"].strip()
                     match = re.search(r'(?i)(Third\s+Party)', desc_text)
@@ -253,46 +280,74 @@ def process_single_pdf(file_data):
                         if part1:
                             items[i-1]["desc"] = (items[i-1]["desc"] + "\n" + part1).strip()
 
-                last_item = items.pop()
+                final_items = []
+                third_party_text_global = ""
+                global_usd = ""
                 
-                merged_items = []
+                # 2. Logic MỚI: Rút trích khối Third Party/Total nhưng KHÔNG CHÈN vào final_items
                 for item in items:
                     if item["item_no"] == "CONTINUATION":
-                        if merged_items: 
-                            merged_items[-1]["marks"] = (merged_items[-1]["marks"] + "\n" + item["marks"]).strip()
-                            merged_items[-1]["desc"] = (merged_items[-1]["desc"] + "\n" + item["desc"]).strip()
-                            merged_items[-1]["origin"] = (merged_items[-1]["origin"] + " " + item["origin"]).strip()
-                            merged_items[-1]["weight_value"] = (merged_items[-1]["weight_value"] + "\n" + item["weight_value"]).strip()
-                            merged_items[-1]["invoice"] = (merged_items[-1]["invoice"] + "\n" + item["invoice"]).strip()
+                        desc_text = item["desc"]
+                        if re.search(r'(?i)Third\s+Party', desc_text) or re.search(r'(?i)^TOTAL', desc_text.strip()):
+                            # Quét đoạn có chứa chữ Third Party để gán vào cột cuối
+                            if re.search(r'(?i)Third\s+Party', desc_text):
+                                third_party_text_global = desc_text.strip()
+                            
+                            # Cứu lấy dữ liệu USD nếu nó nằm ở dòng rác này
+                            u_match = re.search(r'USD\s*([\d,\.]+)', item["weight_value"], re.IGNORECASE)
+                            if not u_match:
+                                u_match = re.search(r'USD\s*([\d,\.]+)', desc_text, re.IGNORECASE)
+                            if u_match:
+                                global_usd = u_match.group(1).strip()
+                                
+                            continue # NHẢY QUA (Xóa luôn dòng Total/Third party này khỏi danh sách row)
+                        
+                        # Merge CONTINUATION thông thường
+                        if final_items:
+                            final_items[-1]["marks"] = (final_items[-1]["marks"] + "\n" + item["marks"]).strip()
+                            final_items[-1]["desc"] = (final_items[-1]["desc"] + "\n" + item["desc"]).strip()
+                            final_items[-1]["origin"] = (final_items[-1]["origin"] + " " + item["origin"]).strip()
+                            final_items[-1]["weight_value"] = (final_items[-1]["weight_value"] + "\n" + item["weight_value"]).strip()
+                            final_items[-1]["invoice"] = (final_items[-1]["invoice"] + "\n" + item["invoice"]).strip()
                     else:
-                        merged_items.append(item)
-                
-                final_items = [last_item] + merged_items
+                        final_items.append(item)
             else:
                 final_items = []
+                third_party_text_global = ""
+                global_usd = ""
             
             for item in final_items:
                 desc = clean_text(item["desc"])
-                invoice = clean_text(item["invoice"]) if item["invoice"] else global_invoice
+                invoice_raw = clean_text(item["invoice"]) if item["invoice"] else global_invoice
                 weight_value_text = clean_text(item["weight_value"])
                 
-                carton, pce, import_hs, export_hs, orig_co, issue_date, auth = parse_description_fields(desc)
+                carton, english_desc, quantity, uom, import_hs, export_hs, orig_co, issue_date, auth = parse_description_fields(desc)
                 
-                if not pce:
-                    pce_fallback = re.search(r'([\d,\.]+)\s*PCE', weight_value_text, re.IGNORECASE)
-                    if pce_fallback:
-                        pce = pce_fallback.group(1).strip()
-                
-                usd_match = re.search(r'USD\s*([\d,\.]+)', weight_value_text, re.IGNORECASE)
-                usd = usd_match.group(1).strip() if usd_match else ""
-                
+                usd = global_usd
                 if not usd:
-                    usd_match_desc = re.search(r'USD\s*([\d,\.]+)', desc, re.IGNORECASE)
-                    usd = usd_match_desc.group(1).strip() if usd_match_desc else ""
+                    usd_match = re.search(r'USD\s*([\d,\.]+)', weight_value_text, re.IGNORECASE)
+                    if not usd_match:
+                        usd_match = re.search(r'USD\s*([\d,\.]+)', desc, re.IGNORECASE)
+                    if usd_match:
+                        usd = usd_match.group(1).strip()
                 
                 item_no_val = clean_text(item["item_no"])
                 if item_no_val.upper() == "CONTINUATION":
                     item_no_val = ""
+                    
+                # --- LOGIC MỚI: TÁCH BOX 10 & FORMAT DATE ---
+                date_pattern = r'(\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\d{1,2}\s+[A-Za-z]+\s+\d{2,4})'
+                d_match = re.search(date_pattern, invoice_raw)
+                invoice_num = invoice_raw
+                invoice_date = ""
+                
+                if d_match:
+                    raw_d = d_match.group(1).strip()
+                    invoice_date = format_to_dd_mmm_yyyy(raw_d)
+                    invoice_num = invoice_raw.replace(raw_d, '').strip()
+
+                issue_date_fmt = format_to_dd_mmm_yyyy(issue_date)
+                date_of_cert_fmt = format_to_dd_mmm_yyyy(global_info["date_of_cert"])
                 
                 extracted_data.append({
                     COLUMNS[0]: global_info["exporter"],
@@ -304,22 +359,26 @@ def process_single_pdf(file_data):
                     COLUMNS[6]: desc,
                     COLUMNS[7]: clean_text(item["origin"]),
                     COLUMNS[8]: weight_value_text,
-                    COLUMNS[9]: invoice,
-                    COLUMNS[10]: global_info["movement_cert"],
-                    COLUMNS[11]: global_info["third_party"],
                     
-                    COLUMNS[12]: clean_text(carton),
-                    COLUMNS[13]: clean_text(pce),
-                    COLUMNS[14]: clean_text(import_hs),
-                    COLUMNS[15]: clean_text(export_hs),
-                    COLUMNS[16]: clean_text(orig_co),
-                    COLUMNS[17]: clean_text(issue_date),
-                    COLUMNS[18]: clean_text(auth),
-                    COLUMNS[19]: global_info["produced_in"],
-                    COLUMNS[20]: global_info["exported_to"],
-                    COLUMNS[21]: global_info["date_of_cert"],
-                    COLUMNS[22]: global_info["form_type"], 
-                    COLUMNS[23]: usd 
+                    COLUMNS[9]: invoice_num,               # Cột tách
+                    COLUMNS[10]: invoice_date,             # Cột tách đã Format Date
+                    COLUMNS[11]: global_info.get("movement_cert", ""),
+                    COLUMNS[12]: global_info.get("third_party", ""),
+                    COLUMNS[13]: clean_text(carton),
+                    COLUMNS[14]: clean_text(english_desc), # English description
+                    COLUMNS[15]: clean_text(import_hs),
+                    COLUMNS[16]: clean_text(export_hs),
+                    COLUMNS[17]: clean_text(orig_co),
+                    COLUMNS[18]: issue_date_fmt,           # Format date
+                    COLUMNS[19]: clean_text(auth),
+                    COLUMNS[20]: clean_text(quantity),     # Quantity
+                    COLUMNS[21]: clean_text(uom),          # UOM
+                    COLUMNS[22]: global_info["produced_in"],
+                    COLUMNS[23]: global_info["exported_to"],
+                    COLUMNS[24]: date_of_cert_fmt,         # Format date
+                    COLUMNS[25]: global_info["form_type"], 
+                    COLUMNS[26]: usd,
+                    COLUMNS[27]: clean_text(third_party_text_global) # Cột Third Party riêng biệt
                 })
     except Exception as e:
         return {"error": f"{file_name}: {str(e)}", "data": [], "file_name": file_name}
@@ -415,12 +474,11 @@ def main():
             st.markdown("**2. Quá trình xử lý**")
             has_files = len(st.session_state.pdf_files) > 0
             
-            # ĐÃ SỬA: Chỉ cần có file là nút sẽ mở khóa (cho phép trích xuất lại nhiều lần)
             if has_files:
                 if not st.session_state.is_processing:
                     if st.button("🚀 BẮT ĐẦU TRÍCH XUẤT", type="primary"):
                         st.session_state.is_processing = True
-                        reset_data_state() # Hàm này sẽ tự động xóa sạch data cũ khi chạy
+                        reset_data_state() 
                         st.rerun()
                 else:
                     if st.button("🛑 Hủy tiến trình", type="secondary"):
@@ -475,13 +533,9 @@ def main():
             errors = []
             total_files = len(st.session_state.pdf_files)
             
-            # Sử dụng ThreadPoolExecutor vì Web truyền đối tượng File Upload, không thể pickling với ProcessPoolExecutor
-            # Đọc toàn bộ file thành byte thô
             safe_file_list = [{"name": f.name, "bytes": f.getvalue()} for f in st.session_state.pdf_files]
             
-            # XỬ LÝ TUẦN TỰ (Không dùng ThreadPool)
             for idx, f_data in enumerate(safe_file_list):
-                # Xử lý trực tiếp trên luồng chính
                 result = process_single_pdf(f_data)
                 
                 if result["error"]: 
@@ -492,7 +546,6 @@ def main():
                 progress_bar.progress((idx + 1) / total_files)
                 status_text.info(f"⏳ Đã xử lý xong: `{result['file_name']}` ({idx + 1}/{total_files})")
                 
-                # Ép hệ thống dọn dẹp RAM ngay lập tức sau mỗi file
                 gc.collect()
 
             st.session_state.extracted_data = all_extracted_data
