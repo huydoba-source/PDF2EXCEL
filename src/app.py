@@ -342,10 +342,14 @@ def process_single_pdf(file_data):
                 # ==========================================
                 issue_date = format_to_dd_mm_yyyy(issue_date)
                 
-                if not pce:
-                    pce_fallback = re.search(r'([\d,\.]+)\s*PCE', weight_value_text, re.IGNORECASE)
-                    if pce_fallback:
-                        pce = pce_fallback.group(1).strip()
+                # ==========================================
+                # FIX BẢN VÁ LỖI TÊN BIẾN (qty & uom thay cho pce)
+                # ==========================================
+                if not qty:
+                    qty_fallback = re.search(r'([\d,\.]+)\s*(PCE|PR|SET|KGS)\b', weight_value_text, re.IGNORECASE)
+                    if qty_fallback:
+                        qty = qty_fallback.group(1).strip()
+                        uom = qty_fallback.group(2).strip().upper()
                 
                 # ==========================================
                 # THAY ĐỔI 5: CHỈ LẤY ĐÚNG GIÁ TRỊ USD TẠI BOX 9
@@ -363,6 +367,8 @@ def process_single_pdf(file_data):
                 weight_value_cleaned = re.sub(r'\s+', ' ', weight_value_cleaned).strip()
 
                 item_no_val = clean_text(item["item_no"])
+                if item_no_val.upper() == "CONTINUATION":
+                    item_no_val = ""
                 
                 # Sắp xếp và map chuẩn xác vào Dictionary đầu ra khớp 100% với mảng COLUMNS
                 extracted_data.append({
@@ -376,8 +382,8 @@ def process_single_pdf(file_data):
                     COLUMNS[7]: clean_text(item["origin"]),
                     COLUMNS[8]: weight_value_cleaned,
                     COLUMNS[9]: invoice,
-                    COLUMNS[10]: invoice_number,      # Cột mới tách ra
-                    COLUMNS[11]: invoice_date,        # Cột mới tách ra
+                    COLUMNS[10]: invoice_number,      
+                    COLUMNS[11]: invoice_date,        
                     COLUMNS[12]: clean_text(carton),
                     COLUMNS[13]: clean_text(eng_desc),
                     COLUMNS[14]: clean_text(import_hs),
@@ -392,7 +398,7 @@ def process_single_pdf(file_data):
                     COLUMNS[23]: global_info["date_of_cert"],
                     COLUMNS[24]: global_info["form_type"], 
                     COLUMNS[25]: usd,
-                    COLUMNS[26]: third_party_column_val,  # Gán giá trị lặp lại cho mọi mặt hàng của file
+                    COLUMNS[26]: third_party_column_val,  
                     COLUMNS[27]: box_13_str
                 })
     except Exception as e:
