@@ -238,9 +238,6 @@ def parse_description_fields(desc_text, weight_value_text=""):
             qty = qty_uom_match_7.group(1).strip()
             uom = qty_uom_match_7.group(2).strip().upper()
             
-    # Chuẩn hóa đơn vị (Xóa chữ S ở số nhiều)
-    if uom and uom.endswith("S") and len(uom) > 3:
-        uom = uom[:-1]
 
     # 3. Trích xuất English description
     eng_desc = ""
