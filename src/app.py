@@ -10,7 +10,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- THƯ VIỆN BỔ SUNG CHO OCR ---
 import pytesseract
-from PIL import Image
+from pytesseract import Output
+from PIL import Image, ImageDraw
 
 # [LƯU Ý]: Code tĩnh của tesseract_cmd đã được vô hiệu hóa để có thể chạy trên Web/Docker.
 # Nếu bạn muốn test trực tiếp trên môi trường Windows local của bạn, hãy bỏ comment dòng dưới:
@@ -96,40 +97,107 @@ def clean_text(text):
         return ""
     return text.strip()
 
-def extract_global_info(page):
+def extract_global_info(page_first, page_last):
+    # --- BOX Ở TRANG ĐẦU TIÊN (PAGE FIRST) ---
     bbox_exporter = (30, 40, 290, 130)  
     bbox_consignee = (30, 130, 290, 200)
     bbox_transport = (30, 220, 290, 330)
     bbox_ref_no = (290, 40, 500, 110)
-    box_movement = (38, 783, 55, 805)
-    box_third_party = (162, 783, 180, 805)
 
-    exporter = clean_text(page.crop(bbox_exporter).extract_text())
-    consignee = clean_text(page.crop(bbox_consignee).extract_text())
-    transport = clean_text(page.crop(bbox_transport).extract_text())
+    exporter = clean_text(page_first.crop(bbox_exporter).extract_text())
+    consignee = clean_text(page_first.crop(bbox_consignee).extract_text())
+    transport = clean_text(page_first.crop(bbox_transport).extract_text())
     
-    raw_ref = page.crop(bbox_ref_no).extract_text()
+    raw_ref = page_first.crop(bbox_ref_no).extract_text()
     ref_match = re.search(r'Reference No\.\s*([A-Z0-9\-]+)', raw_ref, re.IGNORECASE)
     reference_no = ref_match.group(1) if ref_match else clean_text(raw_ref)
 
-    def is_checked(bbox):
-        cropped = page.crop(bbox)
-        img = cropped.to_image(resolution=150).original.convert("L")
-        try:
-            pixels = list(img.get_flattened_data())
-        except AttributeError:
-            pixels = list(img.getdata())
-        dark_pixels = sum(1 for p in pixels if p < 128)
-        return "Yes" if (dark_pixels / len(pixels)) > 0.05 else "No"
+    # --- TÍCH HỢP OCR ĐỂ LẤY LOẠI FORM (PAGE FIRST) ---
+    form_type = ""
+    try:
+        bbox_form = (290, 0, page_first.width, 150)
+        cropped_form_page = page_first.crop(bbox_form)
+        cropped_img_obj = cropped_form_page.to_image(resolution=300)
+        pil_image = cropped_img_obj.original
+        
+        ocr_text = pytesseract.image_to_string(pil_image)
+        
+        form_match = re.search(r'FORM\s*([A-Za-z0-9]+)', ocr_text, re.IGNORECASE)
+        if form_match:
+            form_type = form_match.group(1).strip().upper()
+    except Exception as e:
+        print(f"[!] Cảnh báo OCR: Xảy ra lỗi khi đọc Form Type - {e}")
+        form_type = "" 
 
-    movement_cert = is_checked(box_movement)
-    third_party = is_checked(box_third_party)
-
-    bbox_box11 = (0, 545, 350, page.height)
-    bbox_box12 = (300, 550, page.width, page.height)
+    # =========================================================
+    # ÁP DỤNG PHƯƠNG PHÁP TỌA ĐỘ ĐỘNG OCR + PIXEL BOX (Movement & Third Party) (PAGE LAST)
+    # =========================================================
+    movement_cert = "No"
+    third_party = "No"
     
-    box11_text = clean_text(page.crop(bbox_box11).extract_text())
-    box12_text = clean_text(page.crop(bbox_box12).extract_text())
+    try:
+        bbox_box13 = (0, 600, page_last.width, page_last.height)
+        cropped_box13 = page_last.crop(bbox_box13)
+        img_box13 = cropped_box13.to_image(resolution=300).original
+        
+        draw = ImageDraw.Draw(img_box13) 
+        ocr_data = pytesseract.image_to_data(img_box13, output_type=Output.DICT)
+        
+        def check_status(keyword_pattern):
+            found_idx = -1
+            for i, text in enumerate(ocr_data['text']):
+                if re.search(keyword_pattern, text, re.IGNORECASE):
+                    found_idx = i
+                    break
+            
+            if found_idx == -1:
+                return ""
+                
+            if keyword_pattern == 'Movement':
+                x = ocr_data['left'][found_idx] + 50
+            else:
+                x = ocr_data['left'][found_idx]
+                
+            y = ocr_data['top'][found_idx]
+            
+            h = 30
+            box_size = int(h * 1.5)
+            box_x_start = max(0, x - box_size - int(h * 0.3))
+            box_x_end = x - int(h * 0.3)
+            box_y_start = max(0, y - int((box_size - h) / 2))
+            box_y_end = box_y_start + box_size
+            
+            draw.rectangle([box_x_start, box_y_start, box_x_end, box_y_end], outline="red", width=3)
+            
+            checkbox_img = img_box13.crop((box_x_start, box_y_start, box_x_end, box_y_end))
+            gray_box = checkbox_img.convert("L")
+            
+            pixels = list(gray_box.getdata())
+            if not pixels:
+                return "No"
+                
+            dark_pixels = sum(1 for p in pixels if p < 128)
+            ratio = dark_pixels / len(pixels)
+            
+            return "Yes" if ratio > 0.12 else "No"
+
+        val_movement = check_status('Movement')
+        if val_movement: movement_cert = val_movement
+        
+        val_third_party = check_status('Third')
+        if val_third_party: third_party = val_third_party
+
+    except Exception as e:
+        print(f"[!] Lỗi khi định vị Checkbox Box 13 bằng OCR: {e}")
+
+    # =========================================================
+
+    # --- LẤY DỮ LIỆU BOX 11 & 12 TỪ TRANG CUỐI (PAGE LAST) ---
+    bbox_box11 = (0, 545, 350, page_last.height)
+    bbox_box12 = (300, 550, page_last.width, page_last.height)
+    
+    box11_text = clean_text(page_last.crop(bbox_box11).extract_text())
+    box12_text = clean_text(page_last.crop(bbox_box12).extract_text())
     
     asean_china = ["CHINA", "VIETNAM", "MALAYSIA", "SINGAPORE", "INDONESIA", "THAILAND", "PHILIPPINES", "BRUNEI", "CAMBODIA", "LAOS", "MYANMAR"]
     country_matches = re.findall(r'\b(' + '|'.join(asean_china) + r')\b', box11_text, re.IGNORECASE)
@@ -141,21 +209,6 @@ def extract_global_info(page):
     date_match = re.search(r'(\d{1,2}\s+[A-Za-z]+\s+\d{4})', box12_text)
     if date_match:
         date_of_cert = format_to_dd_mm_yyyy(date_match.group(1))
-
-    form_type = ""
-    try:
-        bbox_form = (290, 0, page.width, 150)
-        cropped_form_page = page.crop(bbox_form)
-        cropped_img_obj = cropped_form_page.to_image(resolution=150)
-        pil_image = cropped_img_obj.original
-        
-        ocr_text = pytesseract.image_to_string(pil_image)
-        form_match = re.search(r'FORM\s*([A-Za-z0-9]+)', ocr_text, re.IGNORECASE)
-        if form_match:
-            form_type = form_match.group(1).strip().upper()
-    except Exception as e:
-        print(f"[!] Cảnh báo OCR: Xảy ra lỗi khi đọc Form Type - {e}")
-        form_type = "" 
 
     return {
         "exporter": exporter, "consignee": consignee, "transport": transport,
@@ -230,8 +283,8 @@ def extract_table_items(pdf):
             if "Item Number" in row_text or "Marks and" in row_text:
                 continue
 
-            # BẬT CỜ BẢO VỆ: Chặn footer tràn vào các Box khác (Origin, Weight)
-            if re.search(r'(?i)(Third\s+Party|TOTAL\s*:)', row_text):
+            # BẬT CỜ BẢO VỆ: Khóa phần TOTAL không cho dính vào item cuối cùng
+            if re.search(r'(?i)(Third\s+Party|\bTOTAL\b)', row_text):
                 in_footer_section = True
 
             col_item_no = [w['text'] for w in row_words if 35 <= w['x0'] < 77]
@@ -244,7 +297,7 @@ def extract_table_items(pdf):
             item_no_text = " ".join(col_item_no).strip()
             check_number = item_no_text.replace(".", "").replace(",", "").strip()
 
-            # NẾU ĐANG ĐỌC FOOTER -> CHỈ LƯU VÀO THIRD PARTY VÀ GLOBAL INVOICE (Không lưu Item)
+            # KHI Ở VÙNG FOOTER -> KHÔNG APPEND VÀO BOX CỦA ITEM MÀ CHỈ LƯU THIRD PARTY
             if in_footer_section:
                 if col_desc:
                     third_party_text += " " + " ".join(col_desc)
@@ -254,7 +307,7 @@ def extract_table_items(pdf):
                         global_invoice += " " + inv_text
                 continue 
 
-            # NẾU LÀ ITEM THƯỜNG -> TIẾP TỤC ĐỌC VÀO LIST
+            # KHI LÀ MẶT HÀNG BÌNH THƯỜNG
             if check_number.isdigit() and len(check_number) > 0: 
                 if current_item: items.append(current_item) 
                 current_item = {
@@ -282,7 +335,7 @@ def extract_table_items(pdf):
 
     if current_item: items.append(current_item)
     
-    # Làm sạch cột Third party, loại bỏ các chữ TOTAL/MYR vô tình dính vào
+    # Làm sạch Third Party
     third_party_text = clean_text(third_party_text)
     third_party_text = re.split(r'(?i)TOTAL|USD|MYR|EUR', third_party_text)[0].strip()
 
@@ -296,7 +349,8 @@ def process_single_pdf(file_data):
     
     try:
         with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-            global_info = extract_global_info(pdf.pages[0])
+            # GỌI HÀM EXTRACT GLOBAL VÀ TRUYỀN ĐÚNG PAGE_FIRST, PAGE_LAST
+            global_info = extract_global_info(pdf.pages[0], pdf.pages[-1])
             items, global_invoice, third_party_column_val = extract_table_items(pdf)
             
             box_13_list = []
@@ -323,7 +377,7 @@ def process_single_pdf(file_data):
                 invoice = clean_text(item["invoice"]) if item["invoice"] else global_invoice
                 weight_value_text = clean_text(item["weight_value"])
                 
-                # TÁCH DỮ LIỆU BOX 10 (Invoice Number & Date of invoices)
+                # TÁCH DỮ LIỆU BOX 10
                 invoice_number = ""
                 invoice_date = ""
                 if invoice:
@@ -336,18 +390,15 @@ def process_single_pdf(file_data):
                         invoice_number = invoice
                 
                 carton, eng_desc, qty, uom, import_hs, export_hs, orig_co, issue_date, auth = parse_description_fields(desc)
-                
-                # CHUYỂN ĐỔI ĐỊNH DẠNG NGÀY THÁNG ĐỒNG BỘ (DD-MM-YYYY)
                 issue_date = format_to_dd_mm_yyyy(issue_date)
                 
-                # Fallback xử lý Quantity & UOM (Loại bỏ lỗi biến pce cũ)
                 if not qty:
                     qty_fallback = re.search(r'([\d,\.]+)\s*(PCE|PR|SET|KGS|CTN|BOX)\b', weight_value_text, re.IGNORECASE)
                     if qty_fallback:
                         qty = qty_fallback.group(1).strip()
                         uom = qty_fallback.group(2).strip().upper()
                 
-                # CHỈ LẤY ĐÚNG GIÁ TRỊ USD TẠI BOX 9
+                # CHỈ LẤY GIÁ TRỊ USD VÀ LÀM SẠCH TRIỆT ĐỂ BOX 9
                 usd_match = re.search(r'USD\s*([\d,\.]+)', weight_value_text, re.IGNORECASE)
                 usd = usd_match.group(1).strip() if usd_match else ""
                 
@@ -355,8 +406,7 @@ def process_single_pdf(file_data):
                     usd_match_desc = re.search(r'USD\s*([\d,\.]+)', desc, re.IGNORECASE)
                     usd = usd_match_desc.group(1).strip() if usd_match_desc else ""
                 
-                # Làm sạch chuỗi Box 9 hiển thị (Chỉ lọc giữ lại thông tin USD, xóa MYR, EUR,...)
-                weight_value_cleaned = weight_value_text
+                weight_value_cleaned = re.split(r'(?i)Third|DESIPRO|TOTAL', weight_value_text)[0].strip()
                 weight_value_cleaned = re.sub(r'\b(MYR|EUR|SGD|VND)\s*[\d,\.]+', '', weight_value_cleaned, flags=re.IGNORECASE)
                 weight_value_cleaned = re.sub(r'\s+', ' ', weight_value_cleaned).strip()
 
@@ -364,7 +414,6 @@ def process_single_pdf(file_data):
                 if item_no_val.upper() == "CONTINUATION":
                     item_no_val = ""
                 
-                # Sắp xếp và map chuẩn xác dữ liệu đầu ra
                 extracted_data.append({
                     COLUMNS[0]: global_info["exporter"],
                     COLUMNS[1]: global_info["consignee"],
