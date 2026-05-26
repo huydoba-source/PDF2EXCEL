@@ -236,6 +236,9 @@ def parse_description_fields(desc_text, weight_value_text=""):
             qty = qty_uom_match_7.group(1).strip()
             uom = qty_uom_match_7.group(2).strip().upper()
             
+    # Chuẩn hóa đơn vị (Xóa chữ S ở số nhiều)
+    if uom and uom.endswith("S") and len(uom) > 3:
+        uom = uom[:-1]
 
     # 3. Trích xuất English description
     eng_desc = ""
@@ -247,7 +250,7 @@ def parse_description_fields(desc_text, weight_value_text=""):
     desc_cleaned = re.sub(r'^\s*[\d,\.]+\s*(?:NUMBER|QUANTITY|AMOUNT|TOTAL)\s+OF\s+[A-Za-z]+\s*(?:[-–—:]\s*)?', '', desc_cleaned, flags=re.IGNORECASE).strip()
     
     # Gọt rác đuôi chuỗi (Bắt linh hoạt các kiểu đuôi "- 10 PIECE", "8 NUMBER OF PAIRS")
-    trailing_qty_pattern = r'[-–—:]?\s*[\d,\.]+\s*(?:PCE|PR|SETS?|KGS?|CTN|BOX|PAIRS?|PIECES?|(?:NUMBER|QUANTITY|AMOUNT)\s+OF\s+[A-Za-z]+)\b[.\s]*$'
+    trailing_qty_pattern = r'[-–—:]?\s*[\d,\.]+\s*(?:PCE|PR|SETS?|KGS?|CTN|BOX|PAIRS?|PIECES?|(?:NUMBER|QUANTITY|AMOUNT|TOTAL)\s+OF\s+[A-Za-z]+)\b[.\s]*$'
     eng_desc = re.sub(trailing_qty_pattern, '', desc_cleaned, flags=re.IGNORECASE).strip()
     eng_desc = re.sub(r'[-–—:]\s*$', '', eng_desc).strip() # Xóa dấu câu thừa
             
@@ -419,34 +422,32 @@ def process_single_pdf(file_data):
                     item_no_val = ""
                 
                 extracted_data.append({
-                    COLUMNS[0]: global_info["exporter"],
-                    COLUMNS[1]: global_info["consignee"],
-                    COLUMNS[2]: global_info["transport"],
-                    COLUMNS[3]: global_info["reference_no"],
-                    COLUMNS[4]: item_no_val,
-                    COLUMNS[5]: clean_text(item["marks"]),
-                    COLUMNS[6]: desc,
-                    COLUMNS[7]: origin_criteria_cleaned,  
-                    COLUMNS[8]: weight_value_cleaned,     
-                    COLUMNS[9]: invoice,
-                    COLUMNS[10]: invoice_number,      
-                    COLUMNS[11]: invoice_date,        
-                    COLUMNS[12]: clean_text(carton),
-                    COLUMNS[13]: clean_text(eng_desc),
-                    COLUMNS[14]: clean_text(import_hs),
-                    COLUMNS[15]: clean_text(export_hs),
-                    COLUMNS[16]: clean_text(orig_co),
-                    COLUMNS[17]: clean_text(issue_date),
-                    COLUMNS[18]: clean_text(auth),
-                    COLUMNS[19]: clean_text(qty),
-                    COLUMNS[20]: clean_text(uom),
-                    COLUMNS[21]: global_info["produced_in"],
-                    COLUMNS[22]: global_info["exported_to"],
-                    COLUMNS[23]: global_info["date_of_cert"],
-                    COLUMNS[24]: global_info["form_type"], 
-                    COLUMNS[25]: usd,
-                    COLUMNS[26]: third_party_column_val,  
-                    COLUMNS[27]: box_13_str
+                    COLUMNS[0]: global_info["form_type"],
+                    COLUMNS[1]: global_info["reference_no"],
+                    COLUMNS[2]: clean_text(orig_co),
+                    COLUMNS[3]: item_no_val,
+                    COLUMNS[4]: clean_text(eng_desc),
+                    COLUMNS[5]: clean_text(qty),
+                    COLUMNS[6]: clean_text(uom),
+                    COLUMNS[7]: usd,
+                    COLUMNS[8]: origin_criteria_cleaned,  
+                    COLUMNS[9]: clean_text(import_hs),
+                    COLUMNS[10]: clean_text(export_hs),      
+                    COLUMNS[11]: invoice_number,      
+                    COLUMNS[12]: invoice_date,        
+                    COLUMNS[13]: clean_text(carton),
+                    COLUMNS[14]: weight_value_cleaned,     
+                    COLUMNS[15]: clean_text(issue_date),
+                    COLUMNS[16]: clean_text(auth),
+                    COLUMNS[17]: desc,
+                    COLUMNS[18]: global_info["date_of_cert"],
+                    COLUMNS[19]: global_info["exporter"],
+                    COLUMNS[20]: global_info["consignee"],
+                    COLUMNS[21]: global_info["transport"],
+                    COLUMNS[22]: global_info["produced_in"],
+                    COLUMNS[23]: global_info["exported_to"],
+                    COLUMNS[24]: clean_text(item["marks"]),
+                    COLUMNS[25]: box_13_str
                 })
     except Exception as e:
         return {"error": f"{file_name}: Lỗi trích xuất - {str(e)}", "data": [], "file_name": file_name}
@@ -496,6 +497,17 @@ def main():
         .data-card {{ background: white; padding: 1.5rem; border-radius: 16px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05); border: 1px solid #E5E7EB; }}
         .badge {{ display: inline-block; padding: 0.35rem 0.8rem; font-size: 0.85rem; font-weight: 600; border-radius: 9999px; background-color: #E0F2FE; color: #0369A1; margin-bottom: 1rem; }}
         .source-name {{ font-size: 0.9rem; color: #374151; font-weight: 600; background: #F3F4F6; padding: 6px 12px; border-radius: 6px; margin-top: 10px; margin-bottom: 5px; display: inline-block; word-break: break-all; }}
+        
+        /* KHÓA NÚT BẮT ĐẦU TRÍCH XUẤT TRONG QUÁ TRÌNH UPLOAD (Dùng CSS :has) */
+        .stApp:has(div[data-testid="stFileUploader"] div[data-testid="stProgressBar"]) div[data-testid="stButton"] button[kind="primary"] {{
+            pointer-events: none !important;
+            opacity: 0.4 !important;
+            cursor: not-allowed !important;
+            background-color: #D1D5DB !important;
+            color: #9CA3AF !important;
+            box-shadow: none !important;
+            transform: none !important;
+        }}
         </style>
     """, unsafe_allow_html=True)
 
@@ -607,7 +619,6 @@ def main():
             processed_count = 0
             
             # KÍCH HOẠT ĐA LUỒNG VỚI ThreadPoolExecutor (max_workers = số file chạy song song)
-            # Bạn có thể chỉnh max_workers=4 hoặc 6 tùy sức mạnh CPU máy bạn
             with ThreadPoolExecutor(max_workers=2) as executor:
                 # Giao toàn bộ danh sách file cho "đội thợ" xử lý
                 future_to_file = {executor.submit(process_single_pdf, f_data): f_data for f_data in safe_file_list}
