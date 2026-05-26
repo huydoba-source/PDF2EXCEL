@@ -61,7 +61,7 @@ def send_email_notification():
     # ⚠️ CHỈ CẦN NHẬP EMAIL CỦA BẠN VÀO ĐÂY (Không cần mật khẩu) ⚠️
     RECEIVER_EMAIL = "huy.doba@decathlon.com" 
     
-    if RECEIVER_EMAIL == "huy.doba@decathlon.com":
+    if RECEIVER_EMAIL == " ":
         return
 
     try:
