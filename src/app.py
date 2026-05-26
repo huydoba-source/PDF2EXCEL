@@ -130,9 +130,9 @@ def extract_global_info(page_first, page_last):
         form_type = "" 
 
     # =========================================================
-    # ÁP DỤNG PHƯƠNG PHÁP TỌA ĐỘ ĐỘNG OCR + PIXEL BOX (Movement & Third Party) (PAGE LAST)
+    # ÁP DỤNG PHƯƠNG PHÁP TỌA ĐỘ ĐỘNG OCR + PIXEL BOX (Movement, Back-to-back & Third Party)
     # =========================================================
-    movement_cert = "No"
+    movement_cert = ""
     third_party = "No"
     
     try:
@@ -153,7 +153,8 @@ def extract_global_info(page_first, page_last):
             if found_idx == -1:
                 return ""
                 
-            if keyword_pattern == 'Movement':
+            # Áp dụng bù trừ tọa độ tương đương nhau cho Movement hoặc Back-to-Back do form design giống nhau
+            if 'Movement' in keyword_pattern or 'Back' in keyword_pattern:
                 x = ocr_data['left'][found_idx] + 50
             else:
                 x = ocr_data['left'][found_idx]
@@ -181,11 +182,19 @@ def extract_global_info(page_first, page_last):
             
             return "Yes" if ratio > 0.12 else "No"
 
+        # Quét trạng thái của Movement, Back-to-back và Third Party
         val_movement = check_status('Movement')
-        if val_movement: movement_cert = val_movement
-        
+        val_b2b = check_status(r'Back-to-Back|Back')
         val_third_party = check_status('Third')
-        if val_third_party: third_party = val_third_party
+        
+        # Hợp nhất logic: Movement và Back-to-Back được ghi nhận tương đương
+        if val_movement == "Yes":
+            movement_cert = "Movement Certificate"
+        elif val_b2b == "Yes":
+            movement_cert = "Back-to-Back CO"
+            
+        if val_third_party == "Yes":
+            third_party = "Yes"
 
     except Exception as e:
         print(f"[!] Lỗi khi định vị Checkbox Box 13 bằng OCR: {e}")
@@ -355,7 +364,10 @@ def process_single_pdf(file_data):
             
             box_13_list = []
             if global_info["third_party"] == "Yes": box_13_list.append("Third Party Invoicing")
-            if global_info["movement_cert"] == "Yes": box_13_list.append("Movement Certificate")
+            
+            # Nếu có giá trị tích (Movement Certificate hoặc Back-to-Back CO) thì nối vào chuỗi Box 13
+            if global_info["movement_cert"]: box_13_list.append(global_info["movement_cert"])
+                
             box_13_str = ", ".join(box_13_list)
 
             # Xử lý dồn các dòng CONTINUATION vào item thật liền trước
