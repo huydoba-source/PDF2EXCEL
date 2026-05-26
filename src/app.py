@@ -56,7 +56,7 @@ DECATHLON_DARK = "#1F2937"
 BG_LIGHT = "#F9FAFB"
 
 # ==========================================
-# 2. HÀM CHUẨN HÓA ĐỊNH DẠNG NGÀY THÁNG (Định dạng: Date - Month - Year)
+# 2. HÀM CHUẨN HÓA ĐỊNH DẠNG NGÀY THÁNG
 # ==========================================
 def format_to_dd_mm_yyyy(date_str):
     if not date_str: return ""
@@ -98,7 +98,6 @@ def clean_text(text):
     return text.strip()
 
 def extract_global_info(page_first, page_last):
-    # --- BOX Ở TRANG ĐẦU TIÊN (PAGE FIRST) ---
     bbox_exporter = (30, 40, 290, 130)  
     bbox_consignee = (30, 130, 290, 200)
     bbox_transport = (30, 220, 290, 330)
@@ -112,7 +111,6 @@ def extract_global_info(page_first, page_last):
     ref_match = re.search(r'Reference No\.\s*([A-Z0-9\-]+)', raw_ref, re.IGNORECASE)
     reference_no = ref_match.group(1) if ref_match else clean_text(raw_ref)
 
-    # --- TÍCH HỢP OCR ĐỂ LẤY LOẠI FORM (PAGE FIRST) ---
     form_type = ""
     try:
         bbox_form = (290, 0, page_first.width, 150)
@@ -121,7 +119,6 @@ def extract_global_info(page_first, page_last):
         pil_image = cropped_img_obj.original
         
         ocr_text = pytesseract.image_to_string(pil_image)
-        
         form_match = re.search(r'FORM\s*([A-Za-z0-9]+)', ocr_text, re.IGNORECASE)
         if form_match:
             form_type = form_match.group(1).strip().upper()
@@ -129,9 +126,6 @@ def extract_global_info(page_first, page_last):
         print(f"[!] Cảnh báo OCR: Xảy ra lỗi khi đọc Form Type - {e}")
         form_type = "" 
 
-    # =========================================================
-    # ÁP DỤNG PHƯƠNG PHÁP TỌA ĐỘ ĐỘNG OCR + PIXEL BOX (Movement, Back-to-back & Third Party)
-    # =========================================================
     movement_cert = ""
     third_party = "No"
     
@@ -150,8 +144,7 @@ def extract_global_info(page_first, page_last):
                     found_idx = i
                     break
             
-            if found_idx == -1:
-                return ""
+            if found_idx == -1: return ""
                 
             if 'Movement' in keyword_pattern or 'Back' in keyword_pattern:
                 x = ocr_data['left'][found_idx] + 50
@@ -159,7 +152,6 @@ def extract_global_info(page_first, page_last):
                 x = ocr_data['left'][found_idx]
                 
             y = ocr_data['top'][found_idx]
-            
             h = 30
             box_size = int(h * 1.5)
             box_x_start = max(0, x - box_size - int(h * 0.3))
@@ -168,37 +160,28 @@ def extract_global_info(page_first, page_last):
             box_y_end = box_y_start + box_size
             
             draw.rectangle([box_x_start, box_y_start, box_x_end, box_y_end], outline="red", width=3)
-            
             checkbox_img = img_box13.crop((box_x_start, box_y_start, box_x_end, box_y_end))
             gray_box = checkbox_img.convert("L")
             
             pixels = list(gray_box.getdata())
-            if not pixels:
-                return "No"
+            if not pixels: return "No"
                 
             dark_pixels = sum(1 for p in pixels if p < 128)
             ratio = dark_pixels / len(pixels)
-            
             return "Yes" if ratio > 0.12 else "No"
 
         val_movement = check_status('Movement')
         val_b2b = check_status(r'Back-to-Back|Back')
         val_third_party = check_status('Third')
         
-        if val_movement == "Yes":
-            movement_cert = "Movement Certificate"
-        elif val_b2b == "Yes":
-            movement_cert = "Back-to-Back CO"
+        if val_movement == "Yes": movement_cert = "Movement Certificate"
+        elif val_b2b == "Yes": movement_cert = "Back-to-Back CO"
             
-        if val_third_party == "Yes":
-            third_party = "Yes"
+        if val_third_party == "Yes": third_party = "Yes"
 
     except Exception as e:
         print(f"[!] Lỗi khi định vị Checkbox Box 13 bằng OCR: {e}")
 
-    # =========================================================
-
-    # --- LẤY DỮ LIỆU BOX 11 & 12 TỪ TRANG CUỐI (PAGE LAST) ---
     bbox_box11 = (0, 545, 350, page_last.height)
     bbox_box12 = (300, 550, page_last.width, page_last.height)
     
@@ -213,8 +196,7 @@ def extract_global_info(page_first, page_last):
     
     date_of_cert = ""
     date_match = re.search(r'(\d{1,2}\s+[A-Za-z]+\s+\d{4})', box12_text)
-    if date_match:
-        date_of_cert = format_to_dd_mm_yyyy(date_match.group(1))
+    if date_match: date_of_cert = format_to_dd_mm_yyyy(date_match.group(1))
 
     return {
         "exporter": exporter, "consignee": consignee, "transport": transport,
@@ -223,28 +205,53 @@ def extract_global_info(page_first, page_last):
         "form_type": form_type
     }
 
-def parse_description_fields(desc_text):
+def parse_description_fields(desc_text, weight_value_text=""):
     text = re.sub(r'\s+', ' ', desc_text).strip()
+    weight_text = re.sub(r'\s+', ' ', weight_value_text).strip()
     
     # 1. Trích xuất Carton từ Box 7
     carton_match = re.search(r'^([\d,\.]+)\s*CARTON', text, re.IGNORECASE)
     carton = carton_match.group(1).strip() if carton_match else ""
     
-    # 2. Trích xuất English description (Hoàn toàn linh hoạt)
-    eng_desc = ""
-    # Lấy toàn bộ phần chữ đứng trước từ "IMPORTING"
-    desc_before_importing = re.split(r'(?i)IMPORTING', text)[0].strip()
-    
-    # Dọn dẹp phần rác định lượng bị dính ở đầu chuỗi (VD: "1 CARTON", "179 NUMBER OF PAIRS")
-    desc_cleaned = re.sub(r'^[\d,\.]+\s*CARTONS?\s*(?:-\s*)?', '', desc_before_importing, flags=re.IGNORECASE).strip()
-    desc_cleaned = re.sub(r'^[\d,\.]+\s*NUMBER\s+OF\s+[A-Za-z]+\s*(?:-\s*)?', '', desc_cleaned, flags=re.IGNORECASE).strip()
-    
-    # XÓA ĐUÔI SỐ LƯỢNG + ĐƠN VỊ ĐỂ LẤY ĐÚNG TÊN HÀNG HÓA (VD: Xóa "- 18 PCE" hoặc "9 PAIR" ở đuôi)
-    # Regex này bắt linh hoạt "số" + "khoảng trắng" + "chữ" ở cuối chuỗi
-    eng_desc = re.sub(r'[-–—]?\s*[\d,\.]+\s*[A-Za-z]+$', '', desc_cleaned).strip()
-    eng_desc = re.sub(r'[-–—:]\s*$', '', eng_desc).strip() # Cắt bỏ dấu câu thừa nếu còn dính
+    # 2. Trích xuất Quantity & UOM (Ưu tiên Box 9)
+    qty, uom = "", ""
+    if weight_text:
+        weight_no_currency = re.sub(r'(?i)(USD|MYR|EUR|SGD|VND)\s*[\d,\.]+', '', weight_text).strip()
+        qty_match = re.search(r'^([0-9][0-9,\.]*)', weight_no_currency)
+        if qty_match: qty = qty_match.group(1).strip()
             
-    # 3. Trích xuất HS Code và CO
+        uom_match = re.search(r'([A-Za-z]+)$', weight_no_currency)
+        if uom_match:
+            uom = uom_match.group(1).strip().upper()
+            
+    # Fallback 1: Nhận diện NUMBER OF... hoặc QUANTITY OF...
+    if not qty:
+        num_of_match = re.search(r'(?:NUMBER|QUANTITY|AMOUNT)\s+OF\s+(PAIRS?|PIECES?|SETS?|PCE|PR|CARTONS?)\s*[-:]?\s*([\d,\.]+)', text, re.IGNORECASE)
+        if num_of_match:
+            uom = num_of_match.group(1).strip().upper()
+            qty = num_of_match.group(2).strip()
+
+    # Fallback 2: Cú pháp chuẩn "- 210 PCE"
+    if not qty:
+        qty_uom_match_7 = re.search(r'(?:-)?\s*([\d,\.]+)\s*(PCE|PR|SETS?|KGS|CTN|BOX|PAIRS?|PIECES?)\b', text, re.IGNORECASE)
+        if qty_uom_match_7:
+            qty = qty_uom_match_7.group(1).strip()
+            uom = qty_uom_match_7.group(2).strip().upper()
+
+    # 3. Trích xuất English description
+    eng_desc = ""
+    # Chặt phần chữ ngay khi đụng IMPORTING, EXPORTING hoặc Original CO (Giải quyết triệt để lỗi không có IMPORTING)
+    desc_before_meta = re.split(r'(?i)(IMPORTING COUNTRY|EXPORTING COUNTRY|Original CO)', text)[0].strip()
+    
+    # Gọt rác đầu chuỗi (CARTON, NUMBER OF...)
+    desc_cleaned = re.sub(r'^[\d,\.]+\s*CARTONS?\s*(?:-\s*)?', '', desc_before_meta, flags=re.IGNORECASE).strip()
+    desc_cleaned = re.sub(r'^[\d,\.]+\s*(?:NUMBER|QUANTITY|AMOUNT|TOTAL)\s+OF\s+[A-Za-z]+\s*(?:-\s*)?', '', desc_cleaned, flags=re.IGNORECASE).strip()
+    
+    # Gọt rác đuôi chuỗi (VD: "- 210 PCE")
+    eng_desc = re.sub(r'[-–—]?\s*[\d,\.]+\s*[A-Za-z]+$', '', desc_cleaned).strip()
+    eng_desc = re.sub(r'[-–—:]\s*$', '', eng_desc).strip()
+            
+    # 4. Trích xuất HS Code và CO
     import_hs_match = re.search(r'IMPORTING COUNTRY HS CODE\s*[:\-]?\s*([A-Za-z0-9\.]+)', text, re.IGNORECASE)
     import_hs = import_hs_match.group(1).strip() if import_hs_match else ""
     
@@ -260,7 +267,7 @@ def parse_description_fields(desc_text):
     auth_match = re.search(r'Issuing Authority\s*:\s*(.*?)(?=TOTAL|Page|$)', text, re.IGNORECASE)
     auth = auth_match.group(1).strip() if auth_match else ""
     
-    return carton, eng_desc, import_hs, export_hs, orig_co, issue_date, auth
+    return carton, eng_desc, qty, uom, import_hs, export_hs, orig_co, issue_date, auth
 
 def extract_table_items(pdf):
     items = []
@@ -290,7 +297,6 @@ def extract_table_items(pdf):
             if "Item Number" in row_text or "Marks and" in row_text:
                 continue
 
-            # BẬT CỜ BẢO VỆ: Khóa phần TOTAL không cho dính vào item cuối cùng
             if re.search(r'(?i)(Third\s+Party|\bTOTAL\b)', row_text):
                 in_footer_section = True
 
@@ -304,17 +310,13 @@ def extract_table_items(pdf):
             item_no_text = " ".join(col_item_no).strip()
             check_number = item_no_text.replace(".", "").replace(",", "").strip()
 
-            # KHI Ở VÙNG FOOTER -> KHÔNG APPEND VÀO BOX CỦA ITEM MÀ CHỈ LƯU THIRD PARTY
             if in_footer_section:
-                if col_desc:
-                    third_party_text += " " + " ".join(col_desc)
+                if col_desc: third_party_text += " " + " ".join(col_desc)
                 if col_invoice:
                     inv_text = " ".join(col_invoice)
-                    if "VN" in inv_text and "/" in inv_text:
-                        global_invoice += " " + inv_text
+                    if "VN" in inv_text and "/" in inv_text: global_invoice += " " + inv_text
                 continue 
 
-            # KHI LÀ MẶT HÀNG BÌNH THƯỜNG
             if check_number.isdigit() and len(check_number) > 0: 
                 if current_item: items.append(current_item) 
                 current_item = {
@@ -342,7 +344,6 @@ def extract_table_items(pdf):
 
     if current_item: items.append(current_item)
     
-    # Làm sạch Third Party
     third_party_text = clean_text(third_party_text)
     third_party_text = re.split(r'(?i)TOTAL|USD|MYR|EUR', third_party_text)[0].strip()
 
@@ -350,17 +351,14 @@ def extract_table_items(pdf):
 
 def process_single_pdf(file_data):
     extracted_data = []
-    
     file_name = file_data["name"]
     file_bytes = file_data["bytes"]
     
     try:
         with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-            # GỌI HÀM EXTRACT GLOBAL VÀ TRUYỀN ĐÚNG PAGE_FIRST, PAGE_LAST
             global_info = extract_global_info(pdf.pages[0], pdf.pages[-1])
             items, global_invoice, third_party_column_val = extract_table_items(pdf)
             
-            # LOGIC BOX 13 (YES/No theo điều kiện kết hợp)
             has_third_party = (global_info["third_party"] == "Yes")
             has_movement_or_b2b = (global_info["movement_cert"] != "")
             
@@ -369,7 +367,6 @@ def process_single_pdf(file_data):
             else:
                 box_13_str = "No"
 
-            # Xử lý dồn các dòng CONTINUATION vào item thật liền trước
             final_items = []
             for item in items:
                 if item["item_no"] == "CONTINUATION" or not item["item_no"].strip():
@@ -388,7 +385,6 @@ def process_single_pdf(file_data):
                 invoice = clean_text(item["invoice"]) if item["invoice"] else global_invoice
                 weight_value_text = clean_text(item["weight_value"])
                 
-                # TÁCH DỮ LIỆU BOX 10
                 invoice_number = ""
                 invoice_date = ""
                 if invoice:
@@ -400,48 +396,19 @@ def process_single_pdf(file_data):
                     else:
                         invoice_number = invoice
                 
-                carton, eng_desc, import_hs, export_hs, orig_co, issue_date, auth = parse_description_fields(desc)
+                carton, eng_desc, qty, uom, import_hs, export_hs, orig_co, issue_date, auth = parse_description_fields(desc, weight_value_text)
                 issue_date = format_to_dd_mm_yyyy(issue_date)
                 
-                # ==========================================
-                # TÁCH ĐỘNG QUANTITY & UOM TỪ CHÍNH BOX 9 (Gross Weight)
-                # ==========================================
-                # Dọn dẹp Box 9 (Xóa tiền tệ, Third Party, TOTAL)
-                weight_value_cleaned = re.split(r'(?i)Third\s*party|DESIPRO|TOTAL', weight_value_text)[0].strip()
-                weight_no_currency = re.sub(r'(?i)(USD|MYR|EUR|SGD|VND)\s*[\d,\.]+', '', weight_value_cleaned).strip()
-                
-                qty, uom = "", ""
-                if weight_no_currency:
-                    # Lấy chữ số đầu tiên làm Quantity
-                    qty_match = re.search(r'^([0-9][0-9,\.]*)', weight_no_currency)
-                    if qty_match:
-                        qty = qty_match.group(1).strip()
-                        
-                    # Lấy cụm chữ cuối cùng làm UOM
-                    uom_match = re.search(r'([A-Za-z]+)$', weight_no_currency)
-                    if uom_match:
-                        uom = uom_match.group(1).strip().upper()
-                        # Chuẩn hóa nếu đơn vị đang là số nhiều (PAIRS -> PAIR, PIECES -> PIECE)
-                        if uom.endswith("S") and len(uom) > 3:
-                            uom = uom[:-1]
-                            
-                # Fallback linh hoạt nếu Box 9 trống: Tìm số lượng và UOM nằm ở phần đuôi của Description (trước chữ IMPORTING)
-                if not qty:
-                    desc_before_importing = re.split(r'(?i)IMPORTING', desc)[0].strip()
-                    fallback_match = re.search(r'([\d,\.]+)\s*([A-Za-z]+)$', desc_before_importing)
-                    if fallback_match:
-                        qty = fallback_match.group(1).strip()
-                        uom = fallback_match.group(2).strip().upper()
-                        if uom.endswith("S") and len(uom) > 3:
-                            uom = uom[:-1]
-                
-                # CHỈ LẤY GIÁ TRỊ USD
                 usd_match = re.search(r'USD\s*([\d,\.]+)', weight_value_text, re.IGNORECASE)
                 usd = usd_match.group(1).strip() if usd_match else ""
                 
                 if not usd:
                     usd_match_desc = re.search(r'USD\s*([\d,\.]+)', desc, re.IGNORECASE)
                     usd = usd_match_desc.group(1).strip() if usd_match_desc else ""
+                
+                weight_value_cleaned = re.split(r'(?i)Third|DESIPRO|TOTAL', weight_value_text)[0].strip()
+                weight_value_cleaned = re.sub(r'\b(MYR|EUR|SGD|VND)\s*[\d,\.]+', '', weight_value_cleaned, flags=re.IGNORECASE)
+                weight_value_cleaned = re.sub(r'\s+', ' ', weight_value_cleaned).strip()
 
                 item_no_val = clean_text(item["item_no"])
                 if item_no_val.upper() == "CONTINUATION":
