@@ -12,6 +12,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import pytesseract
 from PIL import Image
 
+# [LƯU Ý]: Code tĩnh của tesseract_cmd đã được vô hiệu hóa để có thể chạy trên Web/Docker.
+# Nếu bạn muốn test trực tiếp trên môi trường Windows local của bạn, hãy bỏ comment dòng dưới:
+# pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+
 # ==========================================
 # 1. ĐỒNG BỘ CẤU HÌNH CỘT DỮ LIỆU ĐẦU RA MỚI KỲ VỌNG
 # ==========================================
@@ -202,6 +206,7 @@ def extract_table_items(pdf):
     items = []
     current_item = None
     global_invoice = ""
+    third_party_text = ""
 
     for page_idx, page in enumerate(pdf.pages):
         table_bbox = (0, 330, page.width, 555)
@@ -216,6 +221,7 @@ def extract_table_items(pdf):
             
         sorted_y = sorted(rows.keys())
         page_changed = True 
+        in_footer_section = False
         
         for y in sorted_y:
             row_words = sorted(rows[y], key=lambda x: x['x0']) 
@@ -223,6 +229,10 @@ def extract_table_items(pdf):
             
             if "Item Number" in row_text or "Marks and" in row_text:
                 continue
+
+            # BẬT CỜ BẢO VỆ: Chặn footer tràn vào các Box khác (Origin, Weight)
+            if re.search(r'(?i)(Third\s+Party|TOTAL\s*:)', row_text):
+                in_footer_section = True
 
             col_item_no = [w['text'] for w in row_words if 35 <= w['x0'] < 77]
             col_marks   = [w['text'] for w in row_words if 77 <= w['x0'] < 150]
@@ -234,6 +244,17 @@ def extract_table_items(pdf):
             item_no_text = " ".join(col_item_no).strip()
             check_number = item_no_text.replace(".", "").replace(",", "").strip()
 
+            # NẾU ĐANG ĐỌC FOOTER -> CHỈ LƯU VÀO THIRD PARTY VÀ GLOBAL INVOICE (Không lưu Item)
+            if in_footer_section:
+                if col_desc:
+                    third_party_text += " " + " ".join(col_desc)
+                if col_invoice:
+                    inv_text = " ".join(col_invoice)
+                    if "VN" in inv_text and "/" in inv_text:
+                        global_invoice += " " + inv_text
+                continue 
+
+            # NẾU LÀ ITEM THƯỜNG -> TIẾP TỤC ĐỌC VÀO LIST
             if check_number.isdigit() and len(check_number) > 0: 
                 if current_item: items.append(current_item) 
                 current_item = {
@@ -260,7 +281,12 @@ def extract_table_items(pdf):
                         global_invoice = current_item["invoice"]
 
     if current_item: items.append(current_item)
-    return items, global_invoice
+    
+    # Làm sạch cột Third party, loại bỏ các chữ TOTAL/MYR vô tình dính vào
+    third_party_text = clean_text(third_party_text)
+    third_party_text = re.split(r'(?i)TOTAL|USD|MYR|EUR', third_party_text)[0].strip()
+
+    return items, global_invoice, third_party_text
 
 def process_single_pdf(file_data):
     extracted_data = []
@@ -271,36 +297,12 @@ def process_single_pdf(file_data):
     try:
         with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
             global_info = extract_global_info(pdf.pages[0])
-            items, global_invoice = extract_table_items(pdf)
+            items, global_invoice, third_party_column_val = extract_table_items(pdf)
             
             box_13_list = []
             if global_info["third_party"] == "Yes": box_13_list.append("Third Party Invoicing")
             if global_info["movement_cert"] == "Yes": box_13_list.append("Movement Certificate")
             box_13_str = ", ".join(box_13_list)
-            
-            # ==========================================
-            # SỬA LỖI CHÍNH: LÀM SẠCH TRIỆT ĐỂ DATA THIRD PARTY TRÊN MỌI CỘT BỊ ẢNH HƯỞNG
-            # ==========================================
-            third_party_column_val = ""
-            for item in items:
-                desc_text = item["desc"].strip()
-                match = re.search(r'(?i)(Third\s+Party)', desc_text)
-                if match:
-                    # 1. Tách trích xuất giữ lại duy nhất giá trị Box 7 cho cột Third Party
-                    raw_tp = desc_text[match.start():].strip()
-                    third_party_column_val = re.split(r'(?i)TOTAL|USD|MYR|EUR', raw_tp)[0].strip()
-                    
-                    # 2. Xóa sạch dấu vết Third party dính ở Box 7 (Mô tả hàng hóa)
-                    item["desc"] = desc_text[:match.start()].strip()
-                    
-                    # 3. FIX: Xóa sạch hoàn toàn text Third Party dính nhầm ở cột Origin Criteria (Box 8)
-                    if item["origin"]:
-                        item["origin"] = re.split(r'(?i)Third|DESIPRO|TOTAL', item["origin"])[0].strip()
-                        
-                    # 4. FIX: Xóa sạch hoàn toàn text Third Party dính nhầm ở cột Gross weight... (Box 9)
-                    if item["weight_value"]:
-                        item["weight_value"] = re.split(r'(?i)Third|DESIPRO', item["weight_value"])[0].strip()
-                    break
 
             # Xử lý dồn các dòng CONTINUATION vào item thật liền trước
             final_items = []
@@ -338,9 +340,9 @@ def process_single_pdf(file_data):
                 # CHUYỂN ĐỔI ĐỊNH DẠNG NGÀY THÁNG ĐỒNG BỘ (DD-MM-YYYY)
                 issue_date = format_to_dd_mm_yyyy(issue_date)
                 
-                # BẢN VÁ LỖI TÊN BIẾN (qty & uom thay cho pce)
+                # Fallback xử lý Quantity & UOM (Loại bỏ lỗi biến pce cũ)
                 if not qty:
-                    qty_fallback = re.search(r'([\d,\.]+)\s*(PCE|PR|SET|KGS)\b', weight_value_text, re.IGNORECASE)
+                    qty_fallback = re.search(r'([\d,\.]+)\s*(PCE|PR|SET|KGS|CTN|BOX)\b', weight_value_text, re.IGNORECASE)
                     if qty_fallback:
                         qty = qty_fallback.group(1).strip()
                         uom = qty_fallback.group(2).strip().upper()
@@ -371,8 +373,8 @@ def process_single_pdf(file_data):
                     COLUMNS[4]: item_no_val,
                     COLUMNS[5]: clean_text(item["marks"]),
                     COLUMNS[6]: desc,
-                    COLUMNS[7]: origin_criteria_cleaned, # Đã làm sạch hoàn toàn text dính từ third party
-                    COLUMNS[8]: weight_value_cleaned,     # Đã làm sạch hoàn toàn text dính từ third party
+                    COLUMNS[7]: origin_criteria_cleaned,  
+                    COLUMNS[8]: weight_value_cleaned,     
                     COLUMNS[9]: invoice,
                     COLUMNS[10]: invoice_number,      
                     COLUMNS[11]: invoice_date,        
@@ -394,7 +396,7 @@ def process_single_pdf(file_data):
                     COLUMNS[27]: box_13_str
                 })
     except Exception as e:
-        return {"error": f"{file_name}: {str(e)}", "data": [], "file_name": file_name}
+        return {"error": f"{file_name}: Lỗi trích xuất - {str(e)}", "data": [], "file_name": file_name}
     return {"error": None, "data": extracted_data, "file_name": file_name}
 
 # ==========================================
