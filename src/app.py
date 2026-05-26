@@ -498,6 +498,17 @@ def main():
         .data-card {{ background: white; padding: 1.5rem; border-radius: 16px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05); border: 1px solid #E5E7EB; }}
         .badge {{ display: inline-block; padding: 0.35rem 0.8rem; font-size: 0.85rem; font-weight: 600; border-radius: 9999px; background-color: #E0F2FE; color: #0369A1; margin-bottom: 1rem; }}
         .source-name {{ font-size: 0.9rem; color: #374151; font-weight: 600; background: #F3F4F6; padding: 6px 12px; border-radius: 6px; margin-top: 10px; margin-bottom: 5px; display: inline-block; word-break: break-all; }}
+        
+        /* KHÓA NÚT BẮT ĐẦU TRÍCH XUẤT TRONG QUÁ TRÌNH UPLOAD (Dùng CSS :has) */
+        .stApp:has(div[data-testid="stFileUploader"] div[data-testid="stProgressBar"]) div[data-testid="stButton"] button[kind="primary"] {
+            pointer-events: none !important;
+            opacity: 0.4 !important;
+            cursor: not-allowed !important;
+            background-color: #D1D5DB !important;
+            color: #9CA3AF !important;
+            box-shadow: none !important;
+            transform: none !important;
+        }
         </style>
     """, unsafe_allow_html=True)
 
