@@ -153,7 +153,7 @@ def extract_global_info(page_first, page_last):
             if found_idx == -1:
                 return ""
                 
-            # Áp dụng bù trừ tọa độ tương đương nhau cho Movement hoặc Back-to-Back do form design giống nhau
+            # Áp dụng bù trừ tọa độ tương đương nhau cho Movement hoặc Back-to-Back
             if 'Movement' in keyword_pattern or 'Back' in keyword_pattern:
                 x = ocr_data['left'][found_idx] + 50
             else:
@@ -362,13 +362,15 @@ def process_single_pdf(file_data):
             global_info = extract_global_info(pdf.pages[0], pdf.pages[-1])
             items, global_invoice, third_party_column_val = extract_table_items(pdf)
             
-            box_13_list = []
-            if global_info["third_party"] == "Yes": box_13_list.append("Third Party Invoicing")
+            # --- LOGIC MỚI CHO BOX 13 ---
+            has_third_party = (global_info["third_party"] == "Yes")
+            has_movement_or_b2b = (global_info["movement_cert"] != "") # Biến này khác chuỗi rỗng khi 1 trong 2 mục được tick
             
-            # Nếu có giá trị tích (Movement Certificate hoặc Back-to-Back CO) thì nối vào chuỗi Box 13
-            if global_info["movement_cert"]: box_13_list.append(global_info["movement_cert"])
-                
-            box_13_str = ", ".join(box_13_list)
+            if has_third_party and has_movement_or_b2b:
+                box_13_str = "Yes"
+            else:
+                box_13_str = "No"
+            # ---------------------------
 
             # Xử lý dồn các dòng CONTINUATION vào item thật liền trước
             final_items = []
