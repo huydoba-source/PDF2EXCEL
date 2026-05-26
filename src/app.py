@@ -226,7 +226,7 @@ def parse_description_fields(desc_text, weight_value_text=""):
             
     # Fallback 1: Nhận diện NUMBER OF... hoặc QUANTITY OF...
     if not qty:
-        num_of_match = re.search(r'(?:NUMBER|QUANTITY|AMOUNT)\s+OF\s+(PAIRS?|PIECES?|SETS?|PCE|PR|CARTONS?)\s*[-:]?\s*([\d,\.]+)', text, re.IGNORECASE)
+        num_of_match = re.search(r'(?:NUMBER|QUANTITY|AMOUNT|TOTAL)\s+OF\s+(PAIRS?|PIECES?|SETS?|PCE|PR|CARTONS?)\s*[-:]?\s*([\d,\.]+)', text, re.IGNORECASE)
         if num_of_match:
             uom = num_of_match.group(1).strip().upper()
             qty = num_of_match.group(2).strip()
@@ -237,19 +237,24 @@ def parse_description_fields(desc_text, weight_value_text=""):
         if qty_uom_match_7:
             qty = qty_uom_match_7.group(1).strip()
             uom = qty_uom_match_7.group(2).strip().upper()
+            
+    # Chuẩn hóa đơn vị (Xóa chữ S ở số nhiều)
+    if uom and uom.endswith("S") and len(uom) > 3:
+        uom = uom[:-1]
 
     # 3. Trích xuất English description
     eng_desc = ""
-    # Chặt phần chữ ngay khi đụng IMPORTING, EXPORTING hoặc Original CO (Giải quyết triệt để lỗi không có IMPORTING)
+    # Chặt phần chữ ngay khi đụng IMPORTING, EXPORTING hoặc Original CO
     desc_before_meta = re.split(r'(?i)(IMPORTING COUNTRY|EXPORTING COUNTRY|Original CO)', text)[0].strip()
     
     # Gọt rác đầu chuỗi (CARTON, NUMBER OF...)
-    desc_cleaned = re.sub(r'^[\d,\.]+\s*CARTONS?\s*(?:-\s*)?', '', desc_before_meta, flags=re.IGNORECASE).strip()
-    desc_cleaned = re.sub(r'^[\d,\.]+\s*(?:NUMBER|QUANTITY|AMOUNT|TOTAL)\s+OF\s+[A-Za-z]+\s*(?:-\s*)?', '', desc_cleaned, flags=re.IGNORECASE).strip()
+    desc_cleaned = re.sub(r'^\s*[\d,\.]+\s*CARTONS?\s*(?:[-–—:]\s*)?', '', desc_before_meta, flags=re.IGNORECASE).strip()
+    desc_cleaned = re.sub(r'^\s*[\d,\.]+\s*(?:NUMBER|QUANTITY|AMOUNT|TOTAL)\s+OF\s+[A-Za-z]+\s*(?:[-–—:]\s*)?', '', desc_cleaned, flags=re.IGNORECASE).strip()
     
-    # Gọt rác đuôi chuỗi (VD: "- 210 PCE")
-    eng_desc = re.sub(r'[-–—]?\s*[\d,\.]+\s*[A-Za-z]+$', '', desc_cleaned).strip()
-    eng_desc = re.sub(r'[-–—:]\s*$', '', eng_desc).strip()
+    # Gọt rác đuôi chuỗi (Bắt linh hoạt các kiểu đuôi "- 10 PIECE", "8 NUMBER OF PAIRS")
+    trailing_qty_pattern = r'[-–—:]?\s*[\d,\.]+\s*(?:PCE|PR|SETS?|KGS?|CTN|BOX|PAIRS?|PIECES?|(?:NUMBER|QUANTITY|AMOUNT)\s+OF\s+[A-Za-z]+)\b[.\s]*$'
+    eng_desc = re.sub(trailing_qty_pattern, '', desc_cleaned, flags=re.IGNORECASE).strip()
+    eng_desc = re.sub(r'[-–—:]\s*$', '', eng_desc).strip() # Xóa dấu câu thừa
             
     # 4. Trích xuất HS Code và CO
     import_hs_match = re.search(r'IMPORTING COUNTRY HS CODE\s*[:\-]?\s*([A-Za-z0-9\.]+)', text, re.IGNORECASE)
@@ -258,8 +263,10 @@ def parse_description_fields(desc_text, weight_value_text=""):
     export_hs_match = re.search(r'EXPORTING COUNTRY HS CODE\s*[:\-]?\s*([A-Za-z0-9\.]+)', text, re.IGNORECASE)
     export_hs = export_hs_match.group(1).strip() if export_hs_match else ""
     
-    orig_co_match = re.search(r'Original CO Reference Number\s*:\s*([A-Za-z0-9\-]+)', text, re.IGNORECASE)
+    # Lấy trọn vẹn Original CO Reference Number (Bao gồm dấu gạch chéo /, khoảng trắng)
+    orig_co_match = re.search(r'Original CO Reference Number\s*:\s*(.*?)(?=Issuance Date|Issuing Authority|TOTAL|$)', text, re.IGNORECASE)
     orig_co = orig_co_match.group(1).strip() if orig_co_match else ""
+    orig_co = re.sub(r'[-–—:.,\s]+$', '', orig_co) # Xóa dấu câu thừa ở đuôi
     
     issue_date_match = re.search(r'Issuance Date\s*:\s*(.*?)(?=Issuing Authority|TOTAL|$)', text, re.IGNORECASE)
     issue_date = issue_date_match.group(1).strip() if issue_date_match else ""
@@ -385,6 +392,7 @@ def process_single_pdf(file_data):
                 invoice = clean_text(item["invoice"]) if item["invoice"] else global_invoice
                 weight_value_text = clean_text(item["weight_value"])
                 
+                # TÁCH DỮ LIỆU BOX 10
                 invoice_number = ""
                 invoice_date = ""
                 if invoice:
@@ -399,6 +407,7 @@ def process_single_pdf(file_data):
                 carton, eng_desc, qty, uom, import_hs, export_hs, orig_co, issue_date, auth = parse_description_fields(desc, weight_value_text)
                 issue_date = format_to_dd_mm_yyyy(issue_date)
                 
+                # LỌC LẤY CHÍNH XÁC SỐ USD CHO CỘT USD
                 usd_match = re.search(r'USD\s*([\d,\.]+)', weight_value_text, re.IGNORECASE)
                 usd = usd_match.group(1).strip() if usd_match else ""
                 
@@ -406,8 +415,8 @@ def process_single_pdf(file_data):
                     usd_match_desc = re.search(r'USD\s*([\d,\.]+)', desc, re.IGNORECASE)
                     usd = usd_match_desc.group(1).strip() if usd_match_desc else ""
                 
-                weight_value_cleaned = re.split(r'(?i)Third|DESIPRO|TOTAL', weight_value_text)[0].strip()
-                weight_value_cleaned = re.sub(r'\b(MYR|EUR|SGD|VND)\s*[\d,\.]+', '', weight_value_cleaned, flags=re.IGNORECASE)
+                # BẢO TOÀN DỮ LIỆU CỘT GROSS WEIGHT (Chỉ xóa chân trang, KHÔNG xóa MYR hay EUR)
+                weight_value_cleaned = re.split(r'(?i)Third\s*party|DESIPRO|\bTOTAL\b', weight_value_text)[0].strip()
                 weight_value_cleaned = re.sub(r'\s+', ' ', weight_value_cleaned).strip()
 
                 item_no_val = clean_text(item["item_no"])
