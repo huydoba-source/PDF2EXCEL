@@ -605,18 +605,30 @@ def main():
             
             safe_file_list = [{"name": f.name, "bytes": f.getvalue()} for f in st.session_state.pdf_files]
             
-            for idx, f_data in enumerate(safe_file_list):
-                result = process_single_pdf(f_data)
+            # Khởi tạo tiến trình đếm
+            processed_count = 0
+            
+            # KÍCH HOẠT ĐA LUỒNG VỚI ThreadPoolExecutor (max_workers = số file chạy song song)
+            # Bạn có thể chỉnh max_workers=4 hoặc 6 tùy sức mạnh CPU máy bạn
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                # Giao toàn bộ danh sách file cho "đội thợ" xử lý
+                future_to_file = {executor.submit(process_single_pdf, f_data): f_data for f_data in safe_file_list}
                 
-                if result["error"]: 
-                    errors.append(result["error"])
-                else: 
-                    all_extracted_data.extend(result["data"])
-                
-                progress_bar.progress((idx + 1) / total_files)
-                status_text.info(f"⏳ Đã xử lý xong: `{result['file_name']}` ({idx + 1}/{total_files})")
-                
-                gc.collect()
+                # Hàm as_completed sẽ bắt ngay lập tức kết quả của bất kỳ file nào xong trước
+                for future in as_completed(future_to_file):
+                    processed_count += 1
+                    result = future.result() # Lấy kết quả từ luồng
+                    
+                    if result["error"]: 
+                        errors.append(result["error"])
+                    else: 
+                        all_extracted_data.extend(result["data"])
+                    
+                    # Cập nhật thanh tiến trình giao diện liên tục
+                    progress_bar.progress(processed_count / total_files)
+                    status_text.info(f"⏳ Đã xử lý xong: `{result['file_name']}` ({processed_count}/{total_files})")
+                    
+                    gc.collect()
 
             st.session_state.extracted_data = all_extracted_data
             st.session_state.errors = errors
