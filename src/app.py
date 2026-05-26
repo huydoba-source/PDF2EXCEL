@@ -40,8 +40,8 @@ COLUMNS = [
     "Original CO Reference Number",
     "Issuance Date",
     "Issuing Authority",
-    "Quantity",                  # Tách riêng số lượng sản phẩm từ Box 9 / Box 7
-    "UOM",                       # Tách riêng đơn vị tính từ Box 9 / Box 7
+    "Quantity",                  # Tách riêng số lượng sản phẩm
+    "UOM",                       # Tách riêng đơn vị tính 
     "produced in",
     "exported to",
     "Date of certification",
@@ -223,68 +223,28 @@ def extract_global_info(page_first, page_last):
         "form_type": form_type
     }
 
-def parse_description_fields(desc_text, weight_value_text=""):
+def parse_description_fields(desc_text):
     text = re.sub(r'\s+', ' ', desc_text).strip()
-    weight_text = re.sub(r'\s+', ' ', weight_value_text).strip()
     
     # 1. Trích xuất Carton từ Box 7
-    carton_match = re.search(r'([\d,\.]+)\s*CARTON', text, re.IGNORECASE)
+    carton_match = re.search(r'^([\d,\.]+)\s*CARTON', text, re.IGNORECASE)
     carton = carton_match.group(1).strip() if carton_match else ""
     
-    # 2. Trích xuất Quantity & UOM (Lấy TUYỆT ĐỐI TỪ BOX 9)
-    qty, uom = "", ""
-    if weight_text:
-        # Lấy các chữ số đầu tiên trong Box 9
-        qty_match = re.search(r'([\d,\.]+)', weight_text)
-        if qty_match:
-            qty = qty_match.group(1).strip()
-        
-        # Lấy UOM từ Box 9 (Cụm chữ cuối cùng trước USD/MYR, hoặc các đơn vị chuẩn)
-        uom_match = re.search(r'(?i)\b(PAIRS?|PIECES?|PCE|PR|SETS?|KGS?|CTN|BOX)\b', weight_text)
-        if uom_match:
-            uom = uom_match.group(1).strip().upper()
-            # Chuẩn hóa đơn vị
-            if uom == "PAIRS": uom = "PAIR"
-            if uom == "PIECES": uom = "PIECE"
-            if uom == "SETS": uom = "SET"
-            
-    # Fallback 1: Hỗ trợ nhận diện cấu trúc đặc biệt "NUMBER OF PAIRS - 247" ở Box 7 nếu Box 9 bị trống
-    if not qty:
-        num_of_match = re.search(r'NUMBER OF (PAIRS?|PIECES?|SETS?|PCE|PR|CARTONS?)\s*[-:]?\s*([\d,\.]+)', text, re.IGNORECASE)
-        if num_of_match:
-            uom = num_of_match.group(1).strip().upper()
-            if uom == "PAIRS": uom = "PAIR"
-            if uom == "PIECES": uom = "PIECE"
-            qty = num_of_match.group(2).strip()
-
-    # Fallback 2: Nếu Box 9 không có, tìm trong Box 7 (desc) với cú pháp "- 247 PCE"
-    if not qty:
-        qty_uom_match_7 = re.search(r'(?:-)?\s*([\d,\.]+)\s*(PCE|PR|SETS?|KGS|CTN|BOX|PAIRS?|PIECES?)\b', text, re.IGNORECASE)
-        if qty_uom_match_7:
-            qty = qty_uom_match_7.group(1).strip()
-            uom = qty_uom_match_7.group(2).strip().upper()
-            if uom == "PAIRS": uom = "PAIR"
-            if uom == "PIECES": uom = "PIECE"
-
-    # 3. Trích xuất English description (Chỉ lấy phần chữ đằng trước số lượng)
+    # 2. Trích xuất English description (Hoàn toàn linh hoạt)
     eng_desc = ""
-    # Cắt bỏ phần "X CARTON(S)" ở đầu chuỗi để làm sạch
-    desc_no_carton = re.sub(r'^[\d,\.]+\s*CARTONS?\b', '', text, flags=re.IGNORECASE).strip()
+    # Lấy toàn bộ phần chữ đứng trước từ "IMPORTING"
+    desc_before_importing = re.split(r'(?i)IMPORTING', text)[0].strip()
     
-    # Xóa bỏ hoàn toàn cụm "NUMBER OF PAIRS - 247" để tránh bị lấy lọt vào English Description
-    desc_no_carton = re.sub(r'NUMBER OF (?:PAIRS?|PIECES?|SETS?|PCE|PR|CARTONS?)\s*[-:]?\s*[\d,\.]+', '', desc_no_carton, flags=re.IGNORECASE).strip()
+    # Dọn dẹp phần rác định lượng bị dính ở đầu chuỗi (VD: "1 CARTON", "179 NUMBER OF PAIRS")
+    desc_cleaned = re.sub(r'^[\d,\.]+\s*CARTONS?\s*(?:-\s*)?', '', desc_before_importing, flags=re.IGNORECASE).strip()
+    desc_cleaned = re.sub(r'^[\d,\.]+\s*NUMBER\s+OF\s+[A-Za-z]+\s*(?:-\s*)?', '', desc_cleaned, flags=re.IGNORECASE).strip()
     
-    # Tìm kiếm toàn bộ cụm từ trước khi đụng tới dấu '-' nối với số, hoặc đụng số lượng kèm UOM, hoặc đụng chữ IMPORTING
-    desc_match = re.search(r'^(.*?)(?:\s*-\s*[\d,\.]+\b|\s+[\d,\.]+\s*(?:PCE|PR|SETS?|KGS|PAIRS?|PIECES?|NUMBER\s+OF)\b|IMPORTING)', desc_no_carton, re.IGNORECASE)
-    
-    if desc_match:
-        eng_desc = desc_match.group(1).strip()
-        # Loại bỏ các ký tự dấu câu (như gạch ngang, dấu hai chấm) bị dư ở cuối chuỗi
-        eng_desc = re.sub(r'[-–—:]\s*$', '', eng_desc).strip()
-    else:
-        eng_desc = desc_no_carton
+    # XÓA ĐUÔI SỐ LƯỢNG + ĐƠN VỊ ĐỂ LẤY ĐÚNG TÊN HÀNG HÓA (VD: Xóa "- 18 PCE" hoặc "9 PAIR" ở đuôi)
+    # Regex này bắt linh hoạt "số" + "khoảng trắng" + "chữ" ở cuối chuỗi
+    eng_desc = re.sub(r'[-–—]?\s*[\d,\.]+\s*[A-Za-z]+$', '', desc_cleaned).strip()
+    eng_desc = re.sub(r'[-–—:]\s*$', '', eng_desc).strip() # Cắt bỏ dấu câu thừa nếu còn dính
             
-    # 4. Trích xuất HS Code và CO
+    # 3. Trích xuất HS Code và CO
     import_hs_match = re.search(r'IMPORTING COUNTRY HS CODE\s*[:\-]?\s*([A-Za-z0-9\.]+)', text, re.IGNORECASE)
     import_hs = import_hs_match.group(1).strip() if import_hs_match else ""
     
@@ -300,7 +260,7 @@ def parse_description_fields(desc_text, weight_value_text=""):
     auth_match = re.search(r'Issuing Authority\s*:\s*(.*?)(?=TOTAL|Page|$)', text, re.IGNORECASE)
     auth = auth_match.group(1).strip() if auth_match else ""
     
-    return carton, eng_desc, qty, uom, import_hs, export_hs, orig_co, issue_date, auth
+    return carton, eng_desc, import_hs, export_hs, orig_co, issue_date, auth
 
 def extract_table_items(pdf):
     items = []
@@ -400,9 +360,7 @@ def process_single_pdf(file_data):
             global_info = extract_global_info(pdf.pages[0], pdf.pages[-1])
             items, global_invoice, third_party_column_val = extract_table_items(pdf)
             
-            # ==========================================
             # LOGIC BOX 13 (YES/No theo điều kiện kết hợp)
-            # ==========================================
             has_third_party = (global_info["third_party"] == "Yes")
             has_movement_or_b2b = (global_info["movement_cert"] != "")
             
@@ -442,22 +400,48 @@ def process_single_pdf(file_data):
                     else:
                         invoice_number = invoice
                 
-                # Truyền Box 9 vào để quét UOM & QTY chính xác
-                carton, eng_desc, qty, uom, import_hs, export_hs, orig_co, issue_date, auth = parse_description_fields(desc, weight_value_text)
+                carton, eng_desc, import_hs, export_hs, orig_co, issue_date, auth = parse_description_fields(desc)
                 issue_date = format_to_dd_mm_yyyy(issue_date)
                 
-                # CHỈ LẤY GIÁ TRỊ USD VÀ LÀM SẠCH TRIỆT ĐỂ BOX 9
+                # ==========================================
+                # TÁCH ĐỘNG QUANTITY & UOM TỪ CHÍNH BOX 9 (Gross Weight)
+                # ==========================================
+                # Dọn dẹp Box 9 (Xóa tiền tệ, Third Party, TOTAL)
+                weight_value_cleaned = re.split(r'(?i)Third\s*party|DESIPRO|TOTAL', weight_value_text)[0].strip()
+                weight_no_currency = re.sub(r'(?i)(USD|MYR|EUR|SGD|VND)\s*[\d,\.]+', '', weight_value_cleaned).strip()
+                
+                qty, uom = "", ""
+                if weight_no_currency:
+                    # Lấy chữ số đầu tiên làm Quantity
+                    qty_match = re.search(r'^([0-9][0-9,\.]*)', weight_no_currency)
+                    if qty_match:
+                        qty = qty_match.group(1).strip()
+                        
+                    # Lấy cụm chữ cuối cùng làm UOM
+                    uom_match = re.search(r'([A-Za-z]+)$', weight_no_currency)
+                    if uom_match:
+                        uom = uom_match.group(1).strip().upper()
+                        # Chuẩn hóa nếu đơn vị đang là số nhiều (PAIRS -> PAIR, PIECES -> PIECE)
+                        if uom.endswith("S") and len(uom) > 3:
+                            uom = uom[:-1]
+                            
+                # Fallback linh hoạt nếu Box 9 trống: Tìm số lượng và UOM nằm ở phần đuôi của Description (trước chữ IMPORTING)
+                if not qty:
+                    desc_before_importing = re.split(r'(?i)IMPORTING', desc)[0].strip()
+                    fallback_match = re.search(r'([\d,\.]+)\s*([A-Za-z]+)$', desc_before_importing)
+                    if fallback_match:
+                        qty = fallback_match.group(1).strip()
+                        uom = fallback_match.group(2).strip().upper()
+                        if uom.endswith("S") and len(uom) > 3:
+                            uom = uom[:-1]
+                
+                # CHỈ LẤY GIÁ TRỊ USD
                 usd_match = re.search(r'USD\s*([\d,\.]+)', weight_value_text, re.IGNORECASE)
                 usd = usd_match.group(1).strip() if usd_match else ""
                 
                 if not usd:
                     usd_match_desc = re.search(r'USD\s*([\d,\.]+)', desc, re.IGNORECASE)
                     usd = usd_match_desc.group(1).strip() if usd_match_desc else ""
-                
-                # Dọn dẹp Box 9 (Loại bỏ các cụm từ "TOTAL" dính dưới chân trang nếu có)
-                weight_value_cleaned = re.split(r'(?i)Third\s*party|DESIPRO|TOTAL', weight_value_text)[0].strip()
-                weight_value_cleaned = re.sub(r'\b(MYR|EUR|SGD|VND)\s*[\d,\.]+', '', weight_value_cleaned, flags=re.IGNORECASE)
-                weight_value_cleaned = re.sub(r'\s+', ' ', weight_value_cleaned).strip()
 
                 item_no_val = clean_text(item["item_no"])
                 if item_no_val.upper() == "CONTINUATION":
