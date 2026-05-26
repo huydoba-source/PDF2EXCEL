@@ -238,6 +238,9 @@ def parse_description_fields(desc_text, weight_value_text=""):
             qty = qty_uom_match_7.group(1).strip()
             uom = qty_uom_match_7.group(2).strip().upper()
             
+    # Chuẩn hóa đơn vị (Xóa chữ S ở số nhiều)
+    if uom and uom.endswith("S") and len(uom) > 3:
+        uom = uom[:-1]
 
     # 3. Trích xuất English description
     eng_desc = ""
@@ -249,7 +252,7 @@ def parse_description_fields(desc_text, weight_value_text=""):
     desc_cleaned = re.sub(r'^\s*[\d,\.]+\s*(?:NUMBER|QUANTITY|AMOUNT|TOTAL)\s+OF\s+[A-Za-z]+\s*(?:[-–—:]\s*)?', '', desc_cleaned, flags=re.IGNORECASE).strip()
     
     # Gọt rác đuôi chuỗi (Bắt linh hoạt các kiểu đuôi "- 10 PIECE", "8 NUMBER OF PAIRS")
-    trailing_qty_pattern = r'[-–—:]?\s*[\d,\.]+\s*(?:PCE|PR|SETS?|KGS?|CTN|BOX|PAIRS?|PIECES?|(?:NUMBER|QUANTITY|AMOUNT)\s+OF\s+[A-Za-z]+)\b[.\s]*$'
+    trailing_qty_pattern = r'[-–—:]?\s*[\d,\.]+\s*(?:PCE|PR|SETS?|KGS?|CTN|BOX|PAIRS?|PIECES?|(?:NUMBER|QUANTITY|AMOUNT|TOTAL)\s+OF\s+[A-Za-z]+)\b[.\s]*$'
     eng_desc = re.sub(trailing_qty_pattern, '', desc_cleaned, flags=re.IGNORECASE).strip()
     eng_desc = re.sub(r'[-–—:]\s*$', '', eng_desc).strip() # Xóa dấu câu thừa
             
@@ -500,7 +503,7 @@ def main():
         .source-name {{ font-size: 0.9rem; color: #374151; font-weight: 600; background: #F3F4F6; padding: 6px 12px; border-radius: 6px; margin-top: 10px; margin-bottom: 5px; display: inline-block; word-break: break-all; }}
         
         /* KHÓA NÚT BẮT ĐẦU TRÍCH XUẤT TRONG QUÁ TRÌNH UPLOAD (Dùng CSS :has) */
-        .stApp:has(div[data-testid="stFileUploader"] div[data-testid="stProgressBar"]) div[data-testid="stButton"] button[kind="primary"] {
+        .stApp:has(div[data-testid="stFileUploader"] div[data-testid="stProgressBar"]) div[data-testid="stButton"] button[kind="primary"] {{
             pointer-events: none !important;
             opacity: 0.4 !important;
             cursor: not-allowed !important;
@@ -508,7 +511,7 @@ def main():
             color: #9CA3AF !important;
             box-shadow: none !important;
             transform: none !important;
-        }
+        }}
         </style>
     """, unsafe_allow_html=True)
 
@@ -620,7 +623,6 @@ def main():
             processed_count = 0
             
             # KÍCH HOẠT ĐA LUỒNG VỚI ThreadPoolExecutor (max_workers = số file chạy song song)
-            # Bạn có thể chỉnh max_workers=4 hoặc 6 tùy sức mạnh CPU máy bạn
             with ThreadPoolExecutor(max_workers=2) as executor:
                 # Giao toàn bộ danh sách file cho "đội thợ" xử lý
                 future_to_file = {executor.submit(process_single_pdf, f_data): f_data for f_data in safe_file_list}
