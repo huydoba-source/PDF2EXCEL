@@ -5,6 +5,7 @@ import os
 import io
 import re
 import time
+import requests  # Bổ sung thư viện requests thay cho smtplib
 import pdfplumber
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -52,6 +53,33 @@ COLUMNS = [
 DECATHLON_BLUE = "#0082C3"
 DECATHLON_DARK = "#1F2937"
 BG_LIGHT = "#F9FAFB"
+
+# ==========================================
+# HÀM GỬI EMAIL KHÔNG CẦN MẬT KHẨU (SỬ DỤNG FORMSUBMIT API)
+# ==========================================
+def send_email_notification():
+    # ⚠️ CHỈ CẦN NHẬP EMAIL CỦA BẠN VÀO ĐÂY (Không cần mật khẩu) ⚠️
+    RECEIVER_EMAIL = "huy.doba@decathlon.com" 
+    
+    if RECEIVER_EMAIL == "huy.doba@decathlon.com":
+        return
+
+    try:
+        # Gửi Request API chứa Tiêu đề và Nội dung
+        url = f"https://formsubmit.co/{RECEIVER_EMAIL}"
+        data = {
+            "_subject": "🚨 Thông báo: Có người truy cập Web Form E/D",
+            "Nội dung": "Vừa có một người dùng mới truy cập vào ứng dụng trích xuất PDF của bạn.",
+            "Thời gian truy cập": time.strftime('%Y-%m-%d %H:%M:%S'),
+            "_captcha": "false", # Tắt captcha xác nhận
+            "_template": "table" # Sử dụng giao diện dạng bảng cho email
+        }
+        
+        requests.post(url, data=data)
+        # Lưu ý: Lần đầu tiên chạy, hãy kiểm tra hộp thư email và bấm nút "Activate formsubmit" để hệ thống hoạt động.
+        
+    except Exception as e:
+        print(f"[!] Lỗi khi gửi thông báo: {e}")
 
 # ==========================================
 # 2. HÀM CHUẨN HÓA ĐỊNH DẠNG NGÀY THÁNG
@@ -249,7 +277,7 @@ def parse_description_fields(desc_text, weight_value_text=""):
     desc_cleaned = re.sub(r'^\s*[\d,\.]+\s*CARTONS?\s*(?:[-–—:]\s*)?', '', desc_before_meta, flags=re.IGNORECASE).strip()
     desc_cleaned = re.sub(r'^\s*[\d,\.]+\s*(?:NUMBER|QUANTITY|AMOUNT|TOTAL)\s+OF\s+[A-Za-z]+\s*(?:[-–—:]\s*)?', '', desc_cleaned, flags=re.IGNORECASE).strip()
     
-    # Gọt rác đuôi chuỗi (Bắt linh hoạt các kiểu đuôi "- 10 PIECE", "8 NUMBER OF PAIRS")
+    # Gọt rác đuôi chuỗi
     trailing_qty_pattern = r'[-–—:]?\s*[\d,\.]+\s*(?:PCE|PR|SETS?|KGS?|CTN|BOX|PAIRS?|PIECES?|(?:NUMBER|QUANTITY|AMOUNT|TOTAL)\s+OF\s+[A-Za-z]+)\b[.\s]*$'
     eng_desc = re.sub(trailing_qty_pattern, '', desc_cleaned, flags=re.IGNORECASE).strip()
     eng_desc = re.sub(r'[-–—:]\s*$', '', eng_desc).strip() # Xóa dấu câu thừa
@@ -413,7 +441,7 @@ def process_single_pdf(file_data):
                     usd_match_desc = re.search(r'USD\s*([\d,\.]+)', desc, re.IGNORECASE)
                     usd = usd_match_desc.group(1).strip() if usd_match_desc else ""
                 
-                # BẢO TOÀN DỮ LIỆU CỘT GROSS WEIGHT (Chỉ xóa chân trang, KHÔNG xóa MYR hay EUR)
+                # BẢO TOÀN DỮ LIỆU CỘT GROSS WEIGHT 
                 weight_value_cleaned = re.split(r'(?i)Third\s*party|DESIPRO|\bTOTAL\b', weight_value_text)[0].strip()
                 weight_value_cleaned = re.sub(r'\s+', ' ', weight_value_cleaned).strip()
 
@@ -470,6 +498,11 @@ def reset_data_state():
 def main():
     st.set_page_config(page_title="Form E Extractor", layout="wide", page_icon="📑")
     init_session_state()
+    
+    # GỬI THÔNG BÁO TỚI EMAIL NGAY KHI NGƯỜI DÙNG MỞ WEB LẦN ĐẦU
+    if "has_sent_email" not in st.session_state:
+        send_email_notification()
+        st.session_state.has_sent_email = True
     
     st.markdown(f"""
         <style>
@@ -615,25 +648,20 @@ def main():
             
             safe_file_list = [{"name": f.name, "bytes": f.getvalue()} for f in st.session_state.pdf_files]
             
-            # Khởi tạo tiến trình đếm
             processed_count = 0
             
-            # KÍCH HOẠT ĐA LUỒNG VỚI ThreadPoolExecutor (max_workers = số file chạy song song)
             with ThreadPoolExecutor(max_workers=2) as executor:
-                # Giao toàn bộ danh sách file cho "đội thợ" xử lý
                 future_to_file = {executor.submit(process_single_pdf, f_data): f_data for f_data in safe_file_list}
                 
-                # Hàm as_completed sẽ bắt ngay lập tức kết quả của bất kỳ file nào xong trước
                 for future in as_completed(future_to_file):
                     processed_count += 1
-                    result = future.result() # Lấy kết quả từ luồng
+                    result = future.result() 
                     
                     if result["error"]: 
                         errors.append(result["error"])
                     else: 
                         all_extracted_data.extend(result["data"])
                     
-                    # Cập nhật thanh tiến trình giao diện liên tục
                     progress_bar.progress(processed_count / total_files)
                     status_text.info(f"⏳ Đã xử lý xong: `{result['file_name']}` ({processed_count}/{total_files})")
                     
