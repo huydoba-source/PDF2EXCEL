@@ -40,8 +40,8 @@ COLUMNS = [
     "Original CO Reference Number",
     "Issuance Date",
     "Issuing Authority",
-    "Quantity",                  # Tách riêng số lượng sản phẩm từ Box 7 / Box 9
-    "UOM",                       # Tách riêng đơn vị tính từ Box 7 / Box 9
+    "Quantity",                  # Tách riêng số lượng sản phẩm từ Box 9 / Box 7
+    "UOM",                       # Tách riêng đơn vị tính từ Box 9 / Box 7
     "produced in",
     "exported to",
     "Date of certification",
@@ -153,7 +153,6 @@ def extract_global_info(page_first, page_last):
             if found_idx == -1:
                 return ""
                 
-            # Áp dụng bù trừ tọa độ tương đương nhau cho Movement hoặc Back-to-Back do form design giống nhau
             if 'Movement' in keyword_pattern or 'Back' in keyword_pattern:
                 x = ocr_data['left'][found_idx] + 50
             else:
@@ -182,12 +181,10 @@ def extract_global_info(page_first, page_last):
             
             return "Yes" if ratio > 0.12 else "No"
 
-        # Quét trạng thái của Movement, Back-to-back và Third Party
         val_movement = check_status('Movement')
         val_b2b = check_status(r'Back-to-Back|Back')
         val_third_party = check_status('Third')
         
-        # Hợp nhất logic: Movement và Back-to-Back được ghi nhận tương đương
         if val_movement == "Yes":
             movement_cert = "Movement Certificate"
         elif val_b2b == "Yes":
@@ -228,37 +225,62 @@ def extract_global_info(page_first, page_last):
 
 def parse_description_fields(desc_text, weight_value_text=""):
     text = re.sub(r'\s+', ' ', desc_text).strip()
+    weight_text = re.sub(r'\s+', ' ', weight_value_text).strip()
     
-    # 1. Trích xuất Carton
+    # 1. Trích xuất Carton từ Box 7
     carton_match = re.search(r'([\d,\.]+)\s*CARTON', text, re.IGNORECASE)
     carton = carton_match.group(1).strip() if carton_match else ""
     
-    # 2. Trích xuất Quantity & UOM (Ưu tiên lấy từ Box 9 cho chuẩn chung Form D và E)
+    # 2. Trích xuất Quantity & UOM (Lấy TUYỆT ĐỐI TỪ BOX 9)
     qty, uom = "", ""
-    if weight_value_text:
-        # Nhận diện đa dạng các đơn vị: PAIR, PAIRS, PIECE, PIECES, PCE, PR, SET, KGS...
-        qty_uom_match = re.search(r'([\d,\.]+)\s*(PCE|PR|SET|KGS|CTN|BOX|PAIR|PAIRS|PIECE|PIECES)\b', weight_value_text, re.IGNORECASE)
-        if qty_uom_match:
-            qty = qty_uom_match.group(1).strip()
-            uom = qty_uom_match.group(2).strip().upper()
+    if weight_text:
+        # Lấy các chữ số đầu tiên trong Box 9
+        qty_match = re.search(r'([\d,\.]+)', weight_text)
+        if qty_match:
+            qty = qty_match.group(1).strip()
+        
+        # Lấy UOM từ Box 9 (Cụm chữ cuối cùng trước USD/MYR, hoặc các đơn vị chuẩn)
+        uom_match = re.search(r'(?i)\b(PAIRS?|PIECES?|PCE|PR|SETS?|KGS?|CTN|BOX)\b', weight_text)
+        if uom_match:
+            uom = uom_match.group(1).strip().upper()
+            # Chuẩn hóa đơn vị
+            if uom == "PAIRS": uom = "PAIR"
+            if uom == "PIECES": uom = "PIECE"
+            if uom == "SETS": uom = "SET"
             
-    # Fallback: Nếu Box 9 không có, tìm trong Box 7 (desc)
+    # Fallback 1: Hỗ trợ nhận diện cấu trúc đặc biệt "NUMBER OF PAIRS - 247" ở Box 7 nếu Box 9 bị trống
     if not qty:
-        qty_uom_match_7 = re.search(r'(?:-)?\s*([\d,\.]+)\s*(PCE|PR|SET|KGS|CTN|BOX|PAIR|PAIRS|PIECE|PIECES)\b', text, re.IGNORECASE)
+        num_of_match = re.search(r'NUMBER OF (PAIRS?|PIECES?|SETS?|PCE|PR|CARTONS?)\s*[-:]?\s*([\d,\.]+)', text, re.IGNORECASE)
+        if num_of_match:
+            uom = num_of_match.group(1).strip().upper()
+            if uom == "PAIRS": uom = "PAIR"
+            if uom == "PIECES": uom = "PIECE"
+            qty = num_of_match.group(2).strip()
+
+    # Fallback 2: Nếu Box 9 không có, tìm trong Box 7 (desc) với cú pháp "- 247 PCE"
+    if not qty:
+        qty_uom_match_7 = re.search(r'(?:-)?\s*([\d,\.]+)\s*(PCE|PR|SETS?|KGS|CTN|BOX|PAIRS?|PIECES?)\b', text, re.IGNORECASE)
         if qty_uom_match_7:
             qty = qty_uom_match_7.group(1).strip()
             uom = qty_uom_match_7.group(2).strip().upper()
+            if uom == "PAIRS": uom = "PAIR"
+            if uom == "PIECES": uom = "PIECE"
 
     # 3. Trích xuất English description (Chỉ lấy phần chữ đằng trước số lượng)
     eng_desc = ""
-    # Cắt bỏ phần "X CARTON" ở đầu chuỗi để làm sạch
+    # Cắt bỏ phần "X CARTON(S)" ở đầu chuỗi để làm sạch
     desc_no_carton = re.sub(r'^[\d,\.]+\s*CARTONS?\b', '', text, flags=re.IGNORECASE).strip()
     
-    # Tìm kiếm toàn bộ cụm từ trước khi đụng tới dấu '-' nối với số, hoặc trước số đi liền với UOM, hoặc chữ IMPORTING
-    desc_match = re.search(r'^(.*?)(?:\s*-\s*[\d,\.]+|\s+[\d,\.]+\s*(?:PCE|PR|SET|KGS|PAIR|PAIRS|PIECE|PIECES)\b|IMPORTING)', desc_no_carton, re.IGNORECASE)
+    # Xóa bỏ hoàn toàn cụm "NUMBER OF PAIRS - 247" để tránh bị lấy lọt vào English Description
+    desc_no_carton = re.sub(r'NUMBER OF (?:PAIRS?|PIECES?|SETS?|PCE|PR|CARTONS?)\s*[-:]?\s*[\d,\.]+', '', desc_no_carton, flags=re.IGNORECASE).strip()
+    
+    # Tìm kiếm toàn bộ cụm từ trước khi đụng tới dấu '-' nối với số, hoặc đụng số lượng kèm UOM, hoặc đụng chữ IMPORTING
+    desc_match = re.search(r'^(.*?)(?:\s*-\s*[\d,\.]+\b|\s+[\d,\.]+\s*(?:PCE|PR|SETS?|KGS|PAIRS?|PIECES?|NUMBER\s+OF)\b|IMPORTING)', desc_no_carton, re.IGNORECASE)
     
     if desc_match:
         eng_desc = desc_match.group(1).strip()
+        # Loại bỏ các ký tự dấu câu (như gạch ngang, dấu hai chấm) bị dư ở cuối chuỗi
+        eng_desc = re.sub(r'[-–—:]\s*$', '', eng_desc).strip()
     else:
         eng_desc = desc_no_carton
             
@@ -379,12 +401,11 @@ def process_single_pdf(file_data):
             items, global_invoice, third_party_column_val = extract_table_items(pdf)
             
             # ==========================================
-            # LOGIC MỚI CHO BOX 13 (YES/No theo điều kiện kết hợp)
+            # LOGIC BOX 13 (YES/No theo điều kiện kết hợp)
             # ==========================================
             has_third_party = (global_info["third_party"] == "Yes")
             has_movement_or_b2b = (global_info["movement_cert"] != "")
             
-            # Chỉ cần Hội đủ 2 điều kiện: Third Party (YES) VÀ (Movement Hoặc Back-to-Back là YES)
             if has_third_party and has_movement_or_b2b:
                 box_13_str = "YES"
             else:
@@ -421,7 +442,7 @@ def process_single_pdf(file_data):
                     else:
                         invoice_number = invoice
                 
-                # Hàm này giờ nhận thêm weight_value_text để bóc tách Quantity và UOM chuẩn hơn
+                # Truyền Box 9 vào để quét UOM & QTY chính xác
                 carton, eng_desc, qty, uom, import_hs, export_hs, orig_co, issue_date, auth = parse_description_fields(desc, weight_value_text)
                 issue_date = format_to_dd_mm_yyyy(issue_date)
                 
@@ -433,7 +454,8 @@ def process_single_pdf(file_data):
                     usd_match_desc = re.search(r'USD\s*([\d,\.]+)', desc, re.IGNORECASE)
                     usd = usd_match_desc.group(1).strip() if usd_match_desc else ""
                 
-                weight_value_cleaned = re.split(r'(?i)Third|DESIPRO|TOTAL', weight_value_text)[0].strip()
+                # Dọn dẹp Box 9 (Loại bỏ các cụm từ "TOTAL" dính dưới chân trang nếu có)
+                weight_value_cleaned = re.split(r'(?i)Third\s*party|DESIPRO|TOTAL', weight_value_text)[0].strip()
                 weight_value_cleaned = re.sub(r'\b(MYR|EUR|SGD|VND)\s*[\d,\.]+', '', weight_value_cleaned, flags=re.IGNORECASE)
                 weight_value_cleaned = re.sub(r'\s+', ' ', weight_value_cleaned).strip()
 
