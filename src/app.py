@@ -7,7 +7,6 @@ import re
 import time
 import requests  
 import pdfplumber
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -24,6 +23,7 @@ from PIL import Image, ImageDraw
 # ==========================================
 # 1. ĐỒNG BỘ CẤU HÌNH CỘT DỮ LIỆU ĐẦU RA MỚI KỲ VỌNG
 # ==========================================
+# Đã xóa 2 cột: "Gross weight..." và "Number and type of packages..."
 COLUMNS = [
     "Form",
     "Reference No",
@@ -39,10 +39,8 @@ COLUMNS = [
     "Invoice Number",
     "Date of invoices",
     "CARTON",
-    "Gross weight or net weight or other quantity, and value",
     "Original CO Issuance Date",
     "Issuing Authority",
-    "Number and type of packages, description of products",
     "Date of certification",
     "Products consigned from (Exporter's business name, address, country)",
     "Products consigned to (Consignee's name, address, country)",
@@ -146,7 +144,8 @@ def extract_global_info(page_first, page_last):
     try:
         bbox_form = (290, 0, page_first.width, 150)
         cropped_form_page = page_first.crop(bbox_form)
-        cropped_img_obj = cropped_form_page.to_image(resolution=300)
+        # HẠ DPI TỪ 300 XUỐNG 200 ĐỂ TĂNG 50% TỐC ĐỘ OCR VÀ TRÁNH TRÀN RAM
+        cropped_img_obj = cropped_form_page.to_image(resolution=200)
         pil_image = cropped_img_obj.original
         
         ocr_text = pytesseract.image_to_string(pil_image)
@@ -163,7 +162,8 @@ def extract_global_info(page_first, page_last):
     try:
         bbox_box13 = (0, 600, page_last.width, page_last.height)
         cropped_box13 = page_last.crop(bbox_box13)
-        img_box13 = cropped_box13.to_image(resolution=300).original
+        # HẠ DPI TỪ 300 XUỐNG 200
+        img_box13 = cropped_box13.to_image(resolution=200).original
         
         draw = ImageDraw.Draw(img_box13) 
         ocr_data = pytesseract.image_to_data(img_box13, output_type=Output.DICT)
@@ -194,7 +194,6 @@ def extract_global_info(page_first, page_last):
             checkbox_img = img_box13.crop((box_x_start, box_y_start, box_x_end, box_y_end))
             gray_box = checkbox_img.convert("L")
             
-            # Khắc phục lỗi DeprecationWarning của Pillow 14
             try:
                 pixels = list(gray_box.get_flattened_data())
             except AttributeError:
@@ -265,7 +264,8 @@ def parse_description_fields(desc_text, weight_value_text=""):
             qty = num_of_match.group(2).strip()
 
     if not qty:
-        qty_uom_match_7 = re.search(r'(?:-)?\s*([\d,\.]+)\s*(PCE|PR|SETS?|KGS|CTN|BOX|PAIRS?|PIECES?)\b', text, re.IGNORECASE)
+        # Fallback lỏng lẻo hơn cho Box 7
+        qty_uom_match_7 = re.search(r'(?:-)?\s*([\d,\.]+)\s*([A-Za-z]+)\b', text, re.IGNORECASE)
         if qty_uom_match_7:
             qty = qty_uom_match_7.group(1).strip()
             uom = qty_uom_match_7.group(2).strip().upper()
@@ -273,21 +273,34 @@ def parse_description_fields(desc_text, weight_value_text=""):
     if uom and uom.endswith("S") and len(uom) > 3:
         uom = uom[:-1]
 
+    # ==========================================
+    # LOGIC CẮT ENGLISH DESCRIPTION LINH HOẠT TỐI ĐA
+    # ==========================================
     eng_desc = ""
     desc_before_meta = re.split(r'(?i)(IMPORTING COUNTRY|EXPORTING COUNTRY|Original CO)', text)[0].strip()
     
     desc_cleaned = re.sub(r'^\s*[\d,\.]+\s*CARTONS?\s*(?:[-–—:]\s*)?', '', desc_before_meta, flags=re.IGNORECASE).strip()
     desc_cleaned = re.sub(r'^\s*[\d,\.]+\s*(?:NUMBER|QUANTITY|AMOUNT|TOTAL)\s+OF\s+[A-Za-z]+\s*(?:[-–—:]\s*)?', '', desc_cleaned, flags=re.IGNORECASE).strip()
     
-    trailing_qty_pattern = r'[-–—:]?\s*[\d,\.]+\s*(?:PCE|PR|SETS?|KGS?|CTN|BOX|PAIRS?|PIECES?|(?:NUMBER|QUANTITY|AMOUNT|TOTAL)\s+OF\s+[A-Za-z]+)\b[.\s]*$'
-    eng_desc = re.sub(trailing_qty_pattern, '', desc_cleaned, flags=re.IGNORECASE).strip()
+    # Bất kỳ thứ gì bắt đầu bằng dấu trừ (-), tiếp theo là khoảng trắng (có hoặc không), tiếp theo là CÁC CON SỐ, tiếp theo là BẤT KỲ CHỮ GÌ (Unit, PCE, ABC...) -> CẮT BỎ HẾT
+    flexible_trailing_pattern = r'[-–—]\s*[\d,\.]+\s*[A-Za-z\s]*$'
+    eng_desc = re.sub(flexible_trailing_pattern, '', desc_cleaned).strip()
+    
+    # Xóa dấu câu thừa ở đuôi nếu có
     eng_desc = re.sub(r'[-–—:]\s*$', '', eng_desc).strip() 
             
+    # ==========================================
+    # LOGIC LẤY ĐÚNG 8 SỐ CHO HS CODE
+    # ==========================================
+    import_hs = ""
     import_hs_match = re.search(r'IMPORTING COUNTRY HS CODE\s*[:\-]?\s*([A-Za-z0-9\.]+)', text, re.IGNORECASE)
-    import_hs = import_hs_match.group(1).strip() if import_hs_match else ""
+    if import_hs_match:
+        import_hs = re.sub(r'\D', '', import_hs_match.group(1))[:8]
     
+    export_hs = ""
     export_hs_match = re.search(r'EXPORTING COUNTRY HS CODE\s*[:\-]?\s*([A-Za-z0-9\.]+)', text, re.IGNORECASE)
-    export_hs = export_hs_match.group(1).strip() if export_hs_match else ""
+    if export_hs_match:
+        export_hs = re.sub(r'\D', '', export_hs_match.group(1))[:8]
     
     orig_co_match = re.search(r'Original CO Reference Number\s*:\s*(.*?)(?=Issuance Date|Issuing Authority|TOTAL|$)', text, re.IGNORECASE)
     orig_co = orig_co_match.group(1).strip() if orig_co_match else ""
@@ -438,13 +451,11 @@ def process_single_pdf(file_data):
                     usd_match_desc = re.search(r'USD\s*([\d,\.]+)', desc, re.IGNORECASE)
                     usd = usd_match_desc.group(1).strip() if usd_match_desc else ""
                 
-                weight_value_cleaned = re.split(r'(?i)Third\s*party|DESIPRO|\bTOTAL\b', weight_value_text)[0].strip()
-                weight_value_cleaned = re.sub(r'\s+', ' ', weight_value_cleaned).strip()
-
                 item_no_val = clean_text(item["item_no"])
                 if item_no_val.upper() == "CONTINUATION":
                     item_no_val = ""
                 
+                # CHỈ LƯU NHỮNG CỘT THEO YÊU CẦU MỚI, KHÔNG XUẤT CỘT GROSS WEIGHT VÀ DESC GỐC NỮA
                 extracted_data.append({
                     COLUMNS[0]: global_info["form_type"],
                     COLUMNS[1]: global_info["reference_no"],
@@ -455,23 +466,21 @@ def process_single_pdf(file_data):
                     COLUMNS[6]: clean_text(uom),
                     COLUMNS[7]: usd,
                     COLUMNS[8]: origin_criteria_cleaned,  
-                    COLUMNS[9]: clean_text(import_hs),
-                    COLUMNS[10]: clean_text(export_hs),      
+                    COLUMNS[9]: import_hs,
+                    COLUMNS[10]: export_hs,      
                     COLUMNS[11]: invoice_number,      
                     COLUMNS[12]: invoice_date,        
                     COLUMNS[13]: clean_text(carton),
-                    COLUMNS[14]: weight_value_cleaned,     
-                    COLUMNS[15]: clean_text(issue_date),
-                    COLUMNS[16]: clean_text(auth),
-                    COLUMNS[17]: desc,
-                    COLUMNS[18]: global_info["date_of_cert"],
-                    COLUMNS[19]: global_info["exporter"],
-                    COLUMNS[20]: global_info["consignee"],
-                    COLUMNS[21]: global_info["transport"],
-                    COLUMNS[22]: global_info["produced_in"],
-                    COLUMNS[23]: global_info["exported_to"],
-                    COLUMNS[24]: clean_text(item["marks"]),
-                    COLUMNS[25]: box_13_str
+                    COLUMNS[14]: clean_text(issue_date),
+                    COLUMNS[15]: clean_text(auth),
+                    COLUMNS[16]: global_info["date_of_cert"],
+                    COLUMNS[17]: global_info["exporter"],
+                    COLUMNS[18]: global_info["consignee"],
+                    COLUMNS[19]: global_info["transport"],
+                    COLUMNS[20]: global_info["produced_in"],
+                    COLUMNS[21]: global_info["exported_to"],
+                    COLUMNS[22]: clean_text(item["marks"]),
+                    COLUMNS[23]: box_13_str
                 })
     except Exception as e:
         return {"error": f"{file_name}: Lỗi trích xuất - {str(e)}", "data": [], "file_name": file_name}
@@ -643,29 +652,22 @@ def main():
             
             safe_file_list = [{"name": f.name, "bytes": f.getvalue()} for f in st.session_state.pdf_files]
             
+            # XỬ LÝ TUẦN TỰ (Sequential) KẾT HỢP DỌN RÁC ĐỂ CHỐNG SEGMENTATION FAULT TỐI ĐA
             processed_count = 0
-            
-            # Giải pháp lai ghép: Cấu trúc đa luồng với Max worker = 1
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future_to_file = {executor.submit(process_single_pdf, f_data): f_data for f_data in safe_file_list}
+            for f_data in safe_file_list:
+                processed_count += 1
+                result = process_single_pdf(f_data)
                 
-                for future in as_completed(future_to_file):
-                    processed_count += 1
-                    result = future.result() 
-                    
-                    if result["error"]: 
-                        errors.append(result["error"])
-                    else: 
-                        all_extracted_data.extend(result["data"])
-                    
-                    progress_bar.progress(processed_count / total_files)
-                    status_text.info(f"⏳ Đã xử lý xong: `{result['file_name']}` ({processed_count}/{total_files})")
-                    
-                    # Dọn dẹp rác cực kỳ hung hãn sau mỗi file
-                    del result
-                    del future
-                    gc.collect()
-                    time.sleep(0.5)
+                if result["error"]: 
+                    errors.append(result["error"])
+                else: 
+                    all_extracted_data.extend(result["data"])
+                
+                progress_bar.progress(processed_count / total_files)
+                status_text.info(f"⏳ Đã xử lý xong: `{result['file_name']}` ({processed_count}/{total_files})")
+                
+                del result
+                gc.collect()
 
             st.session_state.extracted_data = all_extracted_data
             st.session_state.errors = errors
@@ -683,6 +685,7 @@ def main():
             st.markdown('<div class="data-card">', unsafe_allow_html=True)
             st.markdown(f"#### 📊 Dữ liệu chi tiết ({len(st.session_state.extracted_data)} dòng)")
             df_result = pd.DataFrame(st.session_state.extracted_data, columns=COLUMNS)
+            # Khắc phục DeprecationWarning của Streamlit
             st.dataframe(df_result, width='stretch', height=450)
             st.markdown('</div>', unsafe_allow_html=True)
 
