@@ -8,7 +8,9 @@ import time
 import requests  # Bổ sung thư viện requests thay cho smtplib
 import pdfplumber
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 # --- THƯ VIỆN BỔ SUNG CHO OCR ---
 import pytesseract
 from pytesseract import Output
@@ -57,29 +59,36 @@ BG_LIGHT = "#F9FAFB"
 # ==========================================
 # HÀM GỬI EMAIL KHÔNG CẦN MẬT KHẨU (SỬ DỤNG FORMSUBMIT API)
 # ==========================================
+
 def send_email_notification():
-    # ⚠️ CHỈ CẦN NHẬP EMAIL CỦA BẠN VÀO ĐÂY (Không cần mật khẩu) ⚠️
+    # 1. EMAIL TRẠM PHÁT (Hãy tạo 1 cái Gmail ảo và tạo Mật khẩu ứng dụng 16 ký tự)
+    SENDER_EMAIL = "nhap_gmail_ao_cua_ban_vao_day@gmail.com" 
+    SENDER_PASSWORD = "nhap_mat_khau_ung_dung_16_ky_tu_vao_day" 
+    
+    # 2. EMAIL NHẬN THÔNG BÁO CỦA BẠN
     RECEIVER_EMAIL = "huy.doba@decathlon.com" 
     
-    if RECEIVER_EMAIL == " ":
+    # Chặn chạy nếu chưa cài đặt email trạm
+    if "nhap_gmail_ao" in SENDER_EMAIL:
         return
 
     try:
-        # Gửi Request API chứa Tiêu đề và Nội dung
-        url = f"https://formsubmit.co/{RECEIVER_EMAIL}"
-        data = {
-            "_subject": "🚨 Thông báo: Có người truy cập Web Form E/D",
-            "Nội dung": "Vừa có một người dùng mới truy cập vào ứng dụng trích xuất PDF của bạn.",
-            "Thời gian truy cập": time.strftime('%Y-%m-%d %H:%M:%S'),
-            "_captcha": "false", # Tắt captcha xác nhận
-            "_template": "table" # Sử dụng giao diện dạng bảng cho email
-        }
+        msg = MIMEMultipart()
+        msg['From'] = f"Hệ thống Form E/D <{SENDER_EMAIL}>"
+        msg['To'] = RECEIVER_EMAIL
+        msg['Subject'] = "🚨 Thông báo: Có người truy cập Web Form E/D"
         
-        requests.post(url, data=data)
-        # Lưu ý: Lần đầu tiên chạy, hãy kiểm tra hộp thư email và bấm nút "Activate formsubmit" để hệ thống hoạt động.
+        body = f"Chào Huy,\n\nVừa có một người dùng mới truy cập vào ứng dụng trích xuất PDF lúc {time.strftime('%Y-%m-%d %H:%M:%S')}."
+        msg.attach(MIMEText(body, 'plain'))
         
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(SENDER_EMAIL, SENDER_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+        print("✅ Đã gửi email thông báo thành công!")
     except Exception as e:
-        print(f"[!] Lỗi khi gửi thông báo: {e}")
+        print(f"[!] Lỗi khi gửi email SMTP: {e}")
 
 # ==========================================
 # 2. HÀM CHUẨN HÓA ĐỊNH DẠNG NGÀY THÁNG
