@@ -62,8 +62,8 @@ BG_LIGHT = "#F9FAFB"
 
 def send_email_notification():
     # 1. EMAIL TRẠM PHÁT (Hãy tạo 1 cái Gmail ảo và tạo Mật khẩu ứng dụng 16 ký tự)
-    SENDER_EMAIL = "nhap_gmail_ao_cua_ban_vao_day@gmail.com" 
-    SENDER_PASSWORD = "nhap_mat_khau_ung_dung_16_ky_tu_vao_day" 
+    SENDER_EMAIL = "dobahuy7@gmail.com" 
+    SENDER_PASSWORD = "kwyv yjud qvhy ehiq" 
     
     # 2. EMAIL NHẬN THÔNG BÁO CỦA BẠN
     RECEIVER_EMAIL = "huy.doba@decathlon.com" 
