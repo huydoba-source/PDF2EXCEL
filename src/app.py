@@ -5,12 +5,13 @@ import os
 import io
 import re
 import time
-import requests  # Bổ sung thư viện requests thay cho smtplib
+import requests  
 import pdfplumber
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+
 # --- THƯ VIỆN BỔ SUNG CHO OCR ---
 import pytesseract
 from pytesseract import Output
@@ -57,18 +58,13 @@ DECATHLON_DARK = "#1F2937"
 BG_LIGHT = "#F9FAFB"
 
 # ==========================================
-# HÀM GỬI EMAIL KHÔNG CẦN MẬT KHẨU (SỬ DỤNG FORMSUBMIT API)
+# HÀM GỬI EMAIL THÔNG BÁO (SMTP)
 # ==========================================
-
 def send_email_notification():
-    # 1. EMAIL TRẠM PHÁT (Hãy tạo 1 cái Gmail ảo và tạo Mật khẩu ứng dụng 16 ký tự)
     SENDER_EMAIL = "dobahuy7@gmail.com" 
     SENDER_PASSWORD = "kwyv yjud qvhy ehiq" 
-    
-    # 2. EMAIL NHẬN THÔNG BÁO CỦA BẠN
     RECEIVER_EMAIL = "huy.doba@decathlon.com" 
     
-    # Chặn chạy nếu chưa cài đặt email trạm
     if "nhap_gmail_ao" in SENDER_EMAIL:
         return
 
@@ -198,7 +194,12 @@ def extract_global_info(page_first, page_last):
             checkbox_img = img_box13.crop((box_x_start, box_y_start, box_x_end, box_y_end))
             gray_box = checkbox_img.convert("L")
             
-            pixels = list(gray_box.getdata())
+            # Khắc phục lỗi DeprecationWarning của Pillow 14
+            try:
+                pixels = list(gray_box.get_flattened_data())
+            except AttributeError:
+                pixels = list(gray_box.getdata())
+                
             if not pixels: return "No"
                 
             dark_pixels = sum(1 for p in pixels if p < 128)
@@ -244,11 +245,9 @@ def parse_description_fields(desc_text, weight_value_text=""):
     text = re.sub(r'\s+', ' ', desc_text).strip()
     weight_text = re.sub(r'\s+', ' ', weight_value_text).strip()
     
-    # 1. Trích xuất Carton từ Box 7
     carton_match = re.search(r'^([\d,\.]+)\s*CARTON', text, re.IGNORECASE)
     carton = carton_match.group(1).strip() if carton_match else ""
     
-    # 2. Trích xuất Quantity & UOM (Ưu tiên Box 9)
     qty, uom = "", ""
     if weight_text:
         weight_no_currency = re.sub(r'(?i)(USD|MYR|EUR|SGD|VND)\s*[\d,\.]+', '', weight_text).strip()
@@ -259,49 +258,40 @@ def parse_description_fields(desc_text, weight_value_text=""):
         if uom_match:
             uom = uom_match.group(1).strip().upper()
             
-    # Fallback 1: Nhận diện NUMBER OF... hoặc QUANTITY OF...
     if not qty:
         num_of_match = re.search(r'(?:NUMBER|QUANTITY|AMOUNT|TOTAL)\s+OF\s+(PAIRS?|PIECES?|SETS?|PCE|PR|CARTONS?)\s*[-:]?\s*([\d,\.]+)', text, re.IGNORECASE)
         if num_of_match:
             uom = num_of_match.group(1).strip().upper()
             qty = num_of_match.group(2).strip()
 
-    # Fallback 2: Cú pháp chuẩn "- 210 PCE"
     if not qty:
         qty_uom_match_7 = re.search(r'(?:-)?\s*([\d,\.]+)\s*(PCE|PR|SETS?|KGS|CTN|BOX|PAIRS?|PIECES?)\b', text, re.IGNORECASE)
         if qty_uom_match_7:
             qty = qty_uom_match_7.group(1).strip()
             uom = qty_uom_match_7.group(2).strip().upper()
             
-    # Chuẩn hóa đơn vị (Xóa chữ S ở số nhiều)
     if uom and uom.endswith("S") and len(uom) > 3:
         uom = uom[:-1]
 
-    # 3. Trích xuất English description
     eng_desc = ""
-    # Chặt phần chữ ngay khi đụng IMPORTING, EXPORTING hoặc Original CO
     desc_before_meta = re.split(r'(?i)(IMPORTING COUNTRY|EXPORTING COUNTRY|Original CO)', text)[0].strip()
     
-    # Gọt rác đầu chuỗi (CARTON, NUMBER OF...)
     desc_cleaned = re.sub(r'^\s*[\d,\.]+\s*CARTONS?\s*(?:[-–—:]\s*)?', '', desc_before_meta, flags=re.IGNORECASE).strip()
     desc_cleaned = re.sub(r'^\s*[\d,\.]+\s*(?:NUMBER|QUANTITY|AMOUNT|TOTAL)\s+OF\s+[A-Za-z]+\s*(?:[-–—:]\s*)?', '', desc_cleaned, flags=re.IGNORECASE).strip()
     
-    # Gọt rác đuôi chuỗi
     trailing_qty_pattern = r'[-–—:]?\s*[\d,\.]+\s*(?:PCE|PR|SETS?|KGS?|CTN|BOX|PAIRS?|PIECES?|(?:NUMBER|QUANTITY|AMOUNT|TOTAL)\s+OF\s+[A-Za-z]+)\b[.\s]*$'
     eng_desc = re.sub(trailing_qty_pattern, '', desc_cleaned, flags=re.IGNORECASE).strip()
-    eng_desc = re.sub(r'[-–—:]\s*$', '', eng_desc).strip() # Xóa dấu câu thừa
+    eng_desc = re.sub(r'[-–—:]\s*$', '', eng_desc).strip() 
             
-    # 4. Trích xuất HS Code và CO
     import_hs_match = re.search(r'IMPORTING COUNTRY HS CODE\s*[:\-]?\s*([A-Za-z0-9\.]+)', text, re.IGNORECASE)
     import_hs = import_hs_match.group(1).strip() if import_hs_match else ""
     
     export_hs_match = re.search(r'EXPORTING COUNTRY HS CODE\s*[:\-]?\s*([A-Za-z0-9\.]+)', text, re.IGNORECASE)
     export_hs = export_hs_match.group(1).strip() if export_hs_match else ""
     
-    # Lấy trọn vẹn Original CO Reference Number (Bao gồm dấu gạch chéo /, khoảng trắng)
     orig_co_match = re.search(r'Original CO Reference Number\s*:\s*(.*?)(?=Issuance Date|Issuing Authority|TOTAL|$)', text, re.IGNORECASE)
     orig_co = orig_co_match.group(1).strip() if orig_co_match else ""
-    orig_co = re.sub(r'[-–—:.,\s]+$', '', orig_co) # Xóa dấu câu thừa ở đuôi
+    orig_co = re.sub(r'[-–—:.,\s]+$', '', orig_co) 
     
     issue_date_match = re.search(r'Issuance Date\s*:\s*(.*?)(?=Issuing Authority|TOTAL|$)', text, re.IGNORECASE)
     issue_date = issue_date_match.group(1).strip() if issue_date_match else ""
@@ -427,7 +417,6 @@ def process_single_pdf(file_data):
                 invoice = clean_text(item["invoice"]) if item["invoice"] else global_invoice
                 weight_value_text = clean_text(item["weight_value"])
                 
-                # TÁCH DỮ LIỆU BOX 10
                 invoice_number = ""
                 invoice_date = ""
                 if invoice:
@@ -442,7 +431,6 @@ def process_single_pdf(file_data):
                 carton, eng_desc, qty, uom, import_hs, export_hs, orig_co, issue_date, auth = parse_description_fields(desc, weight_value_text)
                 issue_date = format_to_dd_mm_yyyy(issue_date)
                 
-                # LỌC LẤY CHÍNH XÁC SỐ USD CHO CỘT USD
                 usd_match = re.search(r'USD\s*([\d,\.]+)', weight_value_text, re.IGNORECASE)
                 usd = usd_match.group(1).strip() if usd_match else ""
                 
@@ -450,7 +438,6 @@ def process_single_pdf(file_data):
                     usd_match_desc = re.search(r'USD\s*([\d,\.]+)', desc, re.IGNORECASE)
                     usd = usd_match_desc.group(1).strip() if usd_match_desc else ""
                 
-                # BẢO TOÀN DỮ LIỆU CỘT GROSS WEIGHT 
                 weight_value_cleaned = re.split(r'(?i)Third\s*party|DESIPRO|\bTOTAL\b', weight_value_text)[0].strip()
                 weight_value_cleaned = re.sub(r'\s+', ' ', weight_value_cleaned).strip()
 
@@ -508,7 +495,6 @@ def main():
     st.set_page_config(page_title="Form E Extractor", layout="wide", page_icon="📑")
     init_session_state()
     
-    # GỬI THÔNG BÁO TỚI EMAIL NGAY KHI NGƯỜI DÙNG MỞ WEB LẦN ĐẦU
     if "has_sent_email" not in st.session_state:
         send_email_notification()
         st.session_state.has_sent_email = True
@@ -659,7 +645,8 @@ def main():
             
             processed_count = 0
             
-            with ThreadPoolExecutor(max_workers=2) as executor:
+            # Giải pháp lai ghép: Cấu trúc đa luồng với Max worker = 1
+            with ThreadPoolExecutor(max_workers=1) as executor:
                 future_to_file = {executor.submit(process_single_pdf, f_data): f_data for f_data in safe_file_list}
                 
                 for future in as_completed(future_to_file):
@@ -674,7 +661,11 @@ def main():
                     progress_bar.progress(processed_count / total_files)
                     status_text.info(f"⏳ Đã xử lý xong: `{result['file_name']}` ({processed_count}/{total_files})")
                     
+                    # Dọn dẹp rác cực kỳ hung hãn sau mỗi file
+                    del result
+                    del future
                     gc.collect()
+                    time.sleep(0.5)
 
             st.session_state.extracted_data = all_extracted_data
             st.session_state.errors = errors
@@ -692,7 +683,7 @@ def main():
             st.markdown('<div class="data-card">', unsafe_allow_html=True)
             st.markdown(f"#### 📊 Dữ liệu chi tiết ({len(st.session_state.extracted_data)} dòng)")
             df_result = pd.DataFrame(st.session_state.extracted_data, columns=COLUMNS)
-            st.dataframe(df_result, use_container_width=True, height=450)
+            st.dataframe(df_result, width='stretch', height=450)
             st.markdown('</div>', unsafe_allow_html=True)
 
 if __name__ == "__main__":
