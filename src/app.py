@@ -23,7 +23,7 @@ from PIL import Image, ImageDraw
 # ==========================================
 # 1. ĐỒNG BỘ CẤU HÌNH CỘT DỮ LIỆU ĐẦU RA MỚI KỲ VỌNG
 # ==========================================
-# Đã xóa 2 cột: "Gross weight..." và "Number and type of packages..."
+# Cột "Gross weight..." và "Number and type of packages..." đã được xóa bỏ
 COLUMNS = [
     "Form",
     "Reference No",
@@ -144,7 +144,6 @@ def extract_global_info(page_first, page_last):
     try:
         bbox_form = (290, 0, page_first.width, 150)
         cropped_form_page = page_first.crop(bbox_form)
-        # HẠ DPI TỪ 300 XUỐNG 200 ĐỂ TĂNG 50% TỐC ĐỘ OCR VÀ TRÁNH TRÀN RAM
         cropped_img_obj = cropped_form_page.to_image(resolution=200)
         pil_image = cropped_img_obj.original
         
@@ -162,7 +161,6 @@ def extract_global_info(page_first, page_last):
     try:
         bbox_box13 = (0, 600, page_last.width, page_last.height)
         cropped_box13 = page_last.crop(bbox_box13)
-        # HẠ DPI TỪ 300 XUỐNG 200
         img_box13 = cropped_box13.to_image(resolution=200).original
         
         draw = ImageDraw.Draw(img_box13) 
@@ -244,9 +242,11 @@ def parse_description_fields(desc_text, weight_value_text=""):
     text = re.sub(r'\s+', ' ', desc_text).strip()
     weight_text = re.sub(r'\s+', ' ', weight_value_text).strip()
     
+    # 1. Trích xuất Carton
     carton_match = re.search(r'^([\d,\.]+)\s*CARTON', text, re.IGNORECASE)
     carton = carton_match.group(1).strip() if carton_match else ""
     
+    # 2. Trích xuất Quantity & UOM (Từ Box 9 hoặc Box 7)
     qty, uom = "", ""
     if weight_text:
         weight_no_currency = re.sub(r'(?i)(USD|MYR|EUR|SGD|VND)\s*[\d,\.]+', '', weight_text).strip()
@@ -264,7 +264,6 @@ def parse_description_fields(desc_text, weight_value_text=""):
             qty = num_of_match.group(2).strip()
 
     if not qty:
-        # Fallback lỏng lẻo hơn cho Box 7
         qty_uom_match_7 = re.search(r'(?:-)?\s*([\d,\.]+)\s*([A-Za-z]+)\b', text, re.IGNORECASE)
         if qty_uom_match_7:
             qty = qty_uom_match_7.group(1).strip()
@@ -279,19 +278,17 @@ def parse_description_fields(desc_text, weight_value_text=""):
     eng_desc = ""
     desc_before_meta = re.split(r'(?i)(IMPORTING COUNTRY|EXPORTING COUNTRY|Original CO)', text)[0].strip()
     
+    # Cắt rác phía trước
     desc_cleaned = re.sub(r'^\s*[\d,\.]+\s*CARTONS?\s*(?:[-–—:]\s*)?', '', desc_before_meta, flags=re.IGNORECASE).strip()
-    desc_cleaned = re.sub(r'^\s*[\d,\.]+\s*(?:NUMBER|QUANTITY|AMOUNT|TOTAL)\s+OF\s+[A-Za-z]+\s*(?:[-–—:]\s*)?', '', desc_cleaned, flags=re.IGNORECASE).strip()
     
-    # Bất kỳ thứ gì bắt đầu bằng dấu trừ (-), tiếp theo là khoảng trắng (có hoặc không), tiếp theo là CÁC CON SỐ, tiếp theo là BẤT KỲ CHỮ GÌ (Unit, PCE, ABC...) -> CẮT BỎ HẾT
-    flexible_trailing_pattern = r'[-–—]\s*[\d,\.]+\s*[A-Za-z\s]*$'
+    # CẮT ĐUÔI LINH HOẠT: Bất kỳ tổ hợp nào của (khoảng trắng/gạch ngang) + SỐ LƯỢNG + (bất kỳ từ nào) nằm ở cuối chuỗi
+    flexible_trailing_pattern = r'(?:\s+[-–—:]\s+|\s+)([\d,\.]+)\s*[A-Za-z\s\.]*$'
     eng_desc = re.sub(flexible_trailing_pattern, '', desc_cleaned).strip()
     
-    # Xóa dấu câu thừa ở đuôi nếu có
-    eng_desc = re.sub(r'[-–—:]\s*$', '', eng_desc).strip() 
+    # Dọn nốt tàn dư dấu câu ở cuối nếu có
+    eng_desc = re.sub(r'[-–—:,]\s*$', '', eng_desc).strip()
             
-    # ==========================================
-    # LOGIC LẤY ĐÚNG 8 SỐ CHO HS CODE
-    # ==========================================
+    # 4. Trích xuất HS Code và CO (Giới hạn đúng 8 chữ số đầu tiên)
     import_hs = ""
     import_hs_match = re.search(r'IMPORTING COUNTRY HS CODE\s*[:\-]?\s*([A-Za-z0-9\.]+)', text, re.IGNORECASE)
     if import_hs_match:
@@ -446,7 +443,6 @@ def process_single_pdf(file_data):
                 
                 usd_match = re.search(r'USD\s*([\d,\.]+)', weight_value_text, re.IGNORECASE)
                 usd = usd_match.group(1).strip() if usd_match else ""
-                
                 if not usd:
                     usd_match_desc = re.search(r'USD\s*([\d,\.]+)', desc, re.IGNORECASE)
                     usd = usd_match_desc.group(1).strip() if usd_match_desc else ""
@@ -455,7 +451,6 @@ def process_single_pdf(file_data):
                 if item_no_val.upper() == "CONTINUATION":
                     item_no_val = ""
                 
-                # CHỈ LƯU NHỮNG CỘT THEO YÊU CẦU MỚI, KHÔNG XUẤT CỘT GROSS WEIGHT VÀ DESC GỐC NỮA
                 extracted_data.append({
                     COLUMNS[0]: global_info["form_type"],
                     COLUMNS[1]: global_info["reference_no"],
@@ -612,6 +607,14 @@ def main():
             st.markdown("**3. Xuất kết quả**")
             if st.session_state.extracted_data is not None:
                 df_result = pd.DataFrame(st.session_state.extracted_data, columns=COLUMNS)
+                
+                # --- CHUYỂN ĐỔI SANG DỮ LIỆU SỐ (NUMERICAL) ---
+                numeric_cols = ["Item Number", "Quantity", "USD", "IMPORTING COUNTRY HS CODE", "EXPORTING COUNTRY HS CODE"]
+                for col in numeric_cols:
+                    if col in df_result.columns:
+                        df_result[col] = df_result[col].astype(str).str.replace(',', '')
+                        df_result[col] = pd.to_numeric(df_result[col], errors='coerce')
+                
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine="openpyxl") as writer:
                     df_result.to_excel(writer, index=False, sheet_name="C_O_FormE")
@@ -652,7 +655,6 @@ def main():
             
             safe_file_list = [{"name": f.name, "bytes": f.getvalue()} for f in st.session_state.pdf_files]
             
-            # XỬ LÝ TUẦN TỰ (Sequential) KẾT HỢP DỌN RÁC ĐỂ CHỐNG SEGMENTATION FAULT TỐI ĐA
             processed_count = 0
             for f_data in safe_file_list:
                 processed_count += 1
@@ -685,6 +687,7 @@ def main():
             st.markdown('<div class="data-card">', unsafe_allow_html=True)
             st.markdown(f"#### 📊 Dữ liệu chi tiết ({len(st.session_state.extracted_data)} dòng)")
             df_result = pd.DataFrame(st.session_state.extracted_data, columns=COLUMNS)
+            
             # Khắc phục DeprecationWarning của Streamlit
             st.dataframe(df_result, width='stretch', height=450)
             st.markdown('</div>', unsafe_allow_html=True)
