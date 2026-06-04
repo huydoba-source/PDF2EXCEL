@@ -609,7 +609,7 @@ def main():
                 df_result = pd.DataFrame(st.session_state.extracted_data, columns=COLUMNS)
                 
                 # --- CHUYỂN ĐỔI SANG DỮ LIỆU SỐ (NUMERICAL) ---
-                numeric_cols = ["Item Number", "Quantity", "USD", "IMPORTING COUNTRY HS CODE", "EXPORTING COUNTRY HS CODE"]
+                numeric_cols = ["Item Number", "Quantity", "USD", "IMPORTING COUNTRY HS CODE", "EXPORTING COUNTRY HS CODE", "CARTON"]
                 for col in numeric_cols:
                     if col in df_result.columns:
                         df_result[col] = df_result[col].astype(str).str.replace(',', '')
