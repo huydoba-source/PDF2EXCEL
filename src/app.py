@@ -17,6 +17,12 @@ from pytesseract import Output
 from PIL import Image, ImageDraw, ImageOps
 from docling.document_converter import DocumentConverter
 
+# [LƯU Ý]: Sửa lại đường dẫn Tesseract trên máy bạn nếu cần
+# pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+
+# ==========================================
+# 1. CẤU HÌNH CỘT DỮ LIỆU ĐẦU RA 
+# ==========================================
 COLUMNS = [
     "Form",
     "Reference No",
@@ -56,24 +62,20 @@ def send_email_notification():
     SENDER_PASSWORD = "kwyv yjud qvhy ehiq" 
     RECEIVER_EMAIL = "huy.doba@decathlon.com" 
     
-    if "nhap_gmail_ao" in SENDER_EMAIL:
-        return
+    if "nhap_gmail_ao" in SENDER_EMAIL: return
 
     try:
         msg = MIMEMultipart()
         msg['From'] = f"Hệ thống Form E/D <{SENDER_EMAIL}>"
         msg['To'] = RECEIVER_EMAIL
         msg['Subject'] = "🚨 Thông báo: Có người truy cập Web Form E/D"
-        
         body = f"Chào Huy,\n\nVừa có một người dùng mới truy cập vào ứng dụng trích xuất PDF lúc {time.strftime('%Y-%m-%d %H:%M:%S')}."
         msg.attach(MIMEText(body, 'plain'))
-        
         server = smtplib.SMTP('smtp.gmail.com', 587)
         server.starttls()
         server.login(SENDER_EMAIL, SENDER_PASSWORD)
         server.send_message(msg)
         server.quit()
-        print("✅ Đã gửi email thông báo thành công!")
     except Exception as e:
         print(f"[!] Lỗi khi gửi email SMTP: {e}")
 
@@ -110,17 +112,27 @@ def clean_text(text):
 # 2. XỬ LÝ ĐẶC BIỆT CHO FILE PDF LÀ ẢNH SCAN TOÀN BỘ
 # ==========================================
 def extract_box13_scanned(page):
-    """ Dùng thuật toán Neo hình học để lấy Box 13 mà không cần lưu ảnh """
+    """ Tích hợp Logic chống nhiễu & Backtracking cho Box 13 (Tác giả: Huy) """
     try:
+        # Cắt 1/4 phần dưới cùng trang
         bbox_13 = (0, page.height - 250, page.width, page.height)
-        img = page.crop(bbox_13).to_image(resolution=300).original
+        crop = page.crop(bbox_13)
+        img = crop.to_image(resolution=300).original
+        
         ocr_data = pytesseract.image_to_data(img, output_type=Output.DICT, config='--oem 3 --psm 11')
         
         words = []
         for i in range(len(ocr_data['text'])):
             text = ocr_data['text'][i].strip()
-            if len(text) >= 2:
-                words.append({'text': text, 'x0': ocr_data['left'][i], 'top': ocr_data['top'][i], 'x1': ocr_data['left'][i] + ocr_data['width'][i], 'h': ocr_data['height'][i]})
+            if not text or len(text) < 2: continue
+            words.append({
+                'text': text,
+                'x0': ocr_data['left'][i],
+                'top': ocr_data['top'][i],
+                'x1': ocr_data['left'][i] + ocr_data['width'][i],
+                'bottom': ocr_data['top'][i] + ocr_data['height'][i],
+                'h': ocr_data['height'][i]
+            })
 
         rows = {}
         for w in words:
@@ -128,51 +140,126 @@ def extract_box13_scanned(page):
             if y_bin not in rows: rows[y_bin] = []
             rows[y_bin].append(w)
 
-        in_box_13 = False 
-        has_checked = False
+        results = {
+            "Third Country Invoicing": "No",
+            "Back-to-Back CO": "No"
+        }
+
+        in_box_13 = False
+        third_done = False
+        back_done = False
 
         for y in sorted(rows.keys()):
             row_words = sorted(rows[y], key=lambda x: x['x0'])
             row_text = " ".join([w['text'] for w in row_words])
 
             if not in_box_13:
-                if re.search(r'(?i)(13\.?|Where\s*appropriate)', row_text): in_box_13 = True
-                continue 
+                if re.search(r'(?i)(13\.?|Where\s*appropriate)', row_text):
+                    in_box_13 = True
+                else:
+                    continue
 
-            if in_box_13 and not has_checked and re.search(r'(?i)\b(Country|Invoicing|Back|CO)\b', row_text):
-                # Neo vào chữ CO, Back, Country, hoặc Invoicing
+            # -------------------------------------------------------------
+            # BOX 1: THIRD COUNTRY INVOICING
+            # -------------------------------------------------------------
+            if in_box_13 and not third_done and re.search(r'(?i)\b(Country|Invoicing)\b', row_text):
                 target_idx = -1
-                for i, w in reversed(list(enumerate(row_words))):
-                    if re.search(r'(?i)\b(CO|Back|Country|Invoicing)\b', w['text']):
+                for i, w in enumerate(row_words):
+                    if re.search(r'(?i)\b(Country|Invoicing)\b', w['text']):
                         target_idx = i
                         break
                 
                 if target_idx != -1:
-                    anchor = row_words[target_idx]
-                    h_word = anchor['h']
-                    # Nội suy khoảng cách
-                    box_size = int(h_word * 1.5)
-                    x_box_end = anchor['x0'] - 10
-                    if re.search(r'(?i)\bCO\b', anchor['text']): x_box_end -= int(13 * h_word * 0.45)
-                    elif re.search(r'(?i)\bCountry\b', anchor['text']): x_box_end -= int(6 * h_word * 0.45)
-                    elif re.search(r'(?i)\bInvoicing\b', anchor['text']): x_box_end -= int(14 * h_word * 0.45)
-                    
+                    start_word = row_words[target_idx]
+                    for i in range(target_idx - 1, -1, -1):
+                        gap = row_words[i+1]['x0'] - row_words[i]['x1']
+                        if gap < 80 and re.search(r'(?i)(Third|Count|Invoic|hir|oun)', row_words[i]['text']):
+                            start_word = row_words[i]
+                        else:
+                            break
+
+                    x_box_end = start_word['x0'] - 8
+                    if not re.search(r'(?i)(Third|hir)', start_word['text']):
+                        x_box_end -= 60
+
+                    h_word = start_word['h']
+                    box_size = int(60 * 1.4) 
                     x_box_start = max(0, x_box_end - box_size)
-                    y_box_start = max(0, anchor['top'] - int((box_size - h_word) / 2))
+                    y_box_start = max(0, start_word['top'] - int((box_size - h_word) / 2))
                     y_box_end = y_box_start + box_size
-                    
+
                     cb_img = img.crop((x_box_start, y_box_start, x_box_end, y_box_end))
                     gray_box = cb_img.convert("L")
                     pixels = list(gray_box.get_flattened_data()) if hasattr(gray_box, 'get_flattened_data') else list(gray_box.getdata())
+
                     dark_pixels = sum(1 for p in pixels if p < 128)
                     ratio = dark_pixels / len(pixels) if len(pixels) > 0 else 0
-                    
                     if ratio > 0.035:
-                        return "YES"
-                    has_checked = True # Chỉ check 1 lần ô đầu tiên tìm thấy
+                        results["Third Country Invoicing"] = "YES"
+                    third_done = True
+
+            # -------------------------------------------------------------
+            # BOX 2: BACK-TO-BACK CO
+            # -------------------------------------------------------------
+            if in_box_13 and not back_done and re.search(r'(?i)\b(Back|CO)\b', row_text):
+                target_idx = -1
+                for i, w in reversed(list(enumerate(row_words))):
+                    if re.search(r'(?i)\b(CO|Back)\b', w['text']):
+                        target_idx = i
+                        break
+
+                if target_idx != -1:
+                    start_word = row_words[target_idx]
+                    for i in range(target_idx - 1, -1, -1):
+                        gap = row_words[i+1]['x0'] - row_words[i]['x1']
+                        if gap < 80 and re.search(r'(?i)(Back|ack|to|\-)', row_words[i]['text']):
+                            start_word = row_words[i]
+                        else:
+                            break
+
+                    start_text = start_word['text']
+                    box_size = int(60 * 1.4) 
+
+                    if re.search(r'(?i)^CO$', start_text):
+                        x_box_end = start_word['x0'] - 140
+                        x_box_start = max(0, x_box_end - box_size)
+                    else:
+                        match = re.search(r'(?i)back', start_text)
+                        if match:
+                            prefix_len = match.start()
+                            if prefix_len >= 2:
+                                x_box_start = start_word['x0']
+                                x_box_end = x_box_start + box_size
+                            else:
+                                x_box_end = start_word['x0'] - 10
+                                x_box_start = max(0, x_box_end - box_size)
+                        else:
+                            x_box_end = start_word['x0'] - 10
+                            x_box_start = max(0, x_box_end - box_size)
+
+                    h_word = start_word['h']
+                    y_box_start = max(0, start_word['top'] - int((box_size - h_word) / 2))
+                    y_box_end = y_box_start + box_size
+
+                    cb_img = img.crop((x_box_start, y_box_start, x_box_end, y_box_end))
+                    gray_box = cb_img.convert("L")
+                    pixels = list(gray_box.get_flattened_data()) if hasattr(gray_box, 'get_flattened_data') else list(gray_box.getdata())
+
+                    dark_pixels = sum(1 for p in pixels if p < 128)
+                    ratio = dark_pixels / len(pixels) if len(pixels) > 0 else 0
+                    if ratio > 0.035:
+                        results["Back-to-Back CO"] = "YES"
+                    back_done = True 
+
+        # Tổng hợp kết quả Box 13
+        if results["Third Country Invoicing"] == "YES" or results["Back-to-Back CO"] == "YES":
+            return "YES"
+        else:
+            return "No"
+            
     except Exception as e:
         print(f"Lỗi đọc Box 13 Scan: {e}")
-    return "No"
+        return "No"
 
 def process_scanned_pdf(pdf, file_name):
     extracted_data = []
@@ -191,17 +278,27 @@ def process_scanned_pdf(pdf, file_name):
     b3_clean = re.sub(r'(?i)Port\s+of\s+Discharge\s*[:;]?', '', b3_clean)
     transport = re.sub(r'\s+', ' ', b3_clean).strip()
     
-    # 2. XỬ LÝ REFERENCE NO VÀ FORM
     reference_no = file_name.replace(".pdf", "")
     
+    # 2. XỬ LÝ DOCLING HOẶC TESSERACT FALLBACK
     docling_full_text = ""
-    converter = DocumentConverter()
-    for i, p in enumerate(pdf.pages):
-        temp_path = f"temp_scanned_page_{i}.png"
-        p.to_image(resolution=300).original.save(temp_path)
-        res = converter.convert(temp_path)
-        docling_full_text += "\n" + res.document.export_to_text()
-        if os.path.exists(temp_path): os.remove(temp_path)
+    try:
+        # Thử sử dụng Docling. Nếu lỗi Permission Denied ở Streamlit Cloud sẽ bắt Exception
+        converter = DocumentConverter()
+        for i, p in enumerate(pdf.pages):
+            temp_path = f"temp_scanned_page_{i}.png"
+            p.to_image(resolution=300).original.save(temp_path)
+            res = converter.convert(temp_path)
+            docling_full_text += "\n" + res.document.export_to_text()
+            if os.path.exists(temp_path): os.remove(temp_path)
+    except Exception as e:
+        # FALLBACK: Chặn lỗi Permission Denied của RapidOCR, chuyển sang dùng Tesseract
+        print(f"[INFO] Bỏ qua Docling do Streamlit chặn quyền ghi. Chuyển sang Tesseract OCR...")
+        docling_full_text = "" 
+        for i, p in enumerate(pdf.pages):
+            img = p.to_image(resolution=300).original
+            # --psm 6 bảo toàn cấu trúc dòng chữ cực kỳ chuẩn xác, tương tự như output của Docling
+            docling_full_text += "\n" + pytesseract.image_to_string(img, config='--oem 3 --psm 6')
         
     form_type = ""
     form_match = re.search(r'(?i)FORM\s*([A-Za-z0-9]+)', docling_full_text)
@@ -225,7 +322,7 @@ def process_scanned_pdf(pdf, file_name):
     
     box_13_str = extract_box13_scanned(page_last)
     
-    # 4. CHIA TÁCH VÀ LỌC CÁC ITEMS TỪ DOCLING RAW TEXT
+    # 4. CHIA TÁCH VÀ LỌC CÁC ITEMS 
     matches = list(re.finditer(r'\b(\d+)[\.\,]?\s+N/M', docling_full_text))
     
     for i in range(len(matches)):
@@ -313,7 +410,7 @@ def process_scanned_pdf(pdf, file_name):
     return {"error": None, "data": extracted_data, "file_name": file_name}
 
 # ==========================================
-# 3. XỬ LÝ CHÍNH CHO FILE PDF CÓ TEXT LAYER (CODE CŨ GIỮ NGUYÊN)
+# 3. XỬ LÝ CHÍNH CHO FILE PDF CÓ TEXT LAYER (CŨ)
 # ==========================================
 def extract_global_info(page_first, page_last):
     bbox_exporter = (30, 40, 290, 130)  
@@ -337,8 +434,7 @@ def extract_global_info(page_first, page_last):
         ocr_text = pytesseract.image_to_string(pil_image)
         form_match = re.search(r'FORM\s*([A-Za-z0-9]+)', ocr_text, re.IGNORECASE)
         if form_match: form_type = form_match.group(1).strip().upper()
-    except:
-        pass
+    except: pass
 
     movement_cert = ""
     third_party = "No"
@@ -367,8 +463,7 @@ def extract_global_info(page_first, page_last):
         if check_status('Movement') == "Yes": movement_cert = "Movement Certificate"
         elif check_status(r'Back-to-Back|Back') == "Yes": movement_cert = "Back-to-Back CO"
         if check_status('Third') == "Yes": third_party = "Yes"
-    except:
-        pass
+    except: pass
 
     bbox_box11 = (0, 545, 350, page_last.height)
     bbox_box12 = (300, 550, page_last.width, page_last.height)
@@ -502,7 +597,7 @@ def process_single_pdf(file_data):
     
     try:
         with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-            # KIỂM TRA TEXT LAYER - Nếu < 50 ký tự -> File Scan
+            # KIỂM TRA TEXT LAYER 
             first_page_text = pdf.pages[0].extract_text()
             if not first_page_text or len(first_page_text.strip()) < 50:
                 if "scanned_files_detected" in st.session_state:
@@ -704,7 +799,6 @@ def main():
         st.markdown('</div>', unsafe_allow_html=True) 
 
     if st.session_state.extracted_data is not None:
-        # CẢNH BÁO UI CHO FILE SCAN
         if st.session_state.scanned_files_detected:
             st.info("ℹ️ **Hệ thống đã nhận diện và áp dụng thuật toán ĐẶC BIỆT cho các file SCAN sau:**\n\n" + 
                     "\n".join([f"- {f}" for f in st.session_state.scanned_files_detected]))
