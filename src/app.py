@@ -19,7 +19,7 @@ from docling.document_converter import DocumentConverter
 
 # [LƯU Ý]: Sửa lại đường dẫn Tesseract trên máy bạn nếu cần
 # pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-
+pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
 # ==========================================
 # 1. CẤU HÌNH CỘT DỮ LIỆU ĐẦU RA 
 # ==========================================
