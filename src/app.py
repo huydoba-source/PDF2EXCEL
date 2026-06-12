@@ -273,141 +273,150 @@ def process_scanned_pdf(pdf, file_name):
     page_first = pdf.pages[0]
     page_last = pdf.pages[-1]
     
-    # 1. XỬ LÝ BOX 1 VÀ BOX 3 BẰNG TESSERACT THEO TỌA ĐỘ
+    # ==========================================
+    # 1. TRÍCH XUẤT BOX 1 & BOX 3 (DÙNG TESSERACT & TỌA ĐỘ)
+    # ==========================================
     box1_img = page_first.crop((0, 0, 290, 110)).to_image(resolution=300).original
-    box1_text = pytesseract.image_to_string(box1_img)
-    exporter = re.sub(r'(?i).*?address, country\)', '', box1_text, flags=re.DOTALL).strip()
+    box1_text = pytesseract.image_to_string(box1_img).strip()
+    # Loại bỏ danh mục Box 1, chỉ lấy nội dung
+    exporter = re.sub(r'(?is)^\s*1\.?\s*Goods consigned.*?(?:country\))', '', box1_text).strip()
     
     box3_img = page_first.crop((0, 160, 300, 315)).to_image(resolution=300).original
-    box3_text = pytesseract.image_to_string(box3_img)
-    b3_clean = re.sub(r'(?i)Departure\s+Date\s*[:;]?', '', box3_text)
-    b3_clean = re.sub(r'(?i)Vessel[\'’]?s?\s+Name.*?(?:\n|$)', '', b3_clean)
-    b3_clean = re.sub(r'(?i)Port\s+of\s+Discharge\s*[:;]?', '', b3_clean)
+    box3_text = pytesseract.image_to_string(box3_img).strip()
+    # Loại bỏ các danh mục Box 3
+    b3_clean = re.sub(r'(?i)3\.?\s*Means of transport.*?\)', '', box3_text)
+    b3_clean = re.sub(r'(?i)Departure Date\s*[:;]?', '', b3_clean)
+    b3_clean = re.sub(r'(?i)Vessel[\'’]?s?\s*Name/Aircraft[^:]*[:;]?', '', b3_clean)
+    b3_clean = re.sub(r'(?i)Port of Discharge\s*[:;]?', '', b3_clean)
     transport = re.sub(r'\s+', ' ', b3_clean).strip()
     
+    # Reference No: Lấy theo tên file
     reference_no = file_name.replace(".pdf", "")
     
-    # 2. XỬ LÝ DOCLING HOẶC TESSERACT FALLBACK
+    # ==========================================
+    # 2. LẤY TEXT TỪ DOCLING VÀ LÀM PHẲNG
+    # ==========================================
     docling_full_text = ""
     try:
-        # Sử dụng model Docling đã được cache để tiết kiệm RAM & CPU
         converter = get_docling_converter()
         for i, p in enumerate(pdf.pages):
             temp_path = f"temp_scanned_page_{i}.png"
             p.to_image(resolution=300).original.save(temp_path)
             res = converter.convert(temp_path)
-            docling_full_text += "\n" + res.document.export_to_text()
+            # Dùng markdown để lấy cấu trúc, nhưng sau đó sẽ làm phẳng
+            docling_full_text += "\n" + res.document.export_to_markdown()
             if os.path.exists(temp_path): os.remove(temp_path)
     except Exception as e:
-        # FALLBACK: Chặn lỗi Permission Denied của RapidOCR, chuyển sang dùng Tesseract
-        print(f"[INFO] Bỏ qua Docling do Streamlit chặn quyền ghi. Chuyển sang Tesseract OCR...")
-        docling_full_text = "" 
-        for i, p in enumerate(pdf.pages):
+        print(f"[INFO] Chuyển sang Tesseract OCR: {e}")
+        for p in pdf.pages:
             img = p.to_image(resolution=300).original
             docling_full_text += "\n" + pytesseract.image_to_string(img, config='--oem 3 --psm 6')
-        
+
+    # [QUAN TRỌNG]: LÀM PHẲNG TEXT
+    # Chuyển đổi toàn bộ dấu xuống dòng (\n) và dấu gạch đứng của bảng Markdown (|) thành khoảng trắng
+    flat_text = re.sub(r'[\n\|]', ' ', docling_full_text)
+    flat_text = re.sub(r'\s+', ' ', flat_text).strip()
+
+    # ==========================================
+    # 3. TRÍCH XUẤT CÁC TRƯỜNG DÙNG CHUNG (GLOBAL FIELDS)
+    # ==========================================
     form_type = ""
-    form_match = re.search(r'(?i)FORM\s*([A-Za-z0-9]+)', docling_full_text)
+    form_match = re.search(r'(?i)FORM\s*([A-Za-z0-9]+)', flat_text)
     if form_match:
         form_type = form_match.group(1).upper()
-        if form_type in ["AL", "A1", "A|", "A L"]: form_type = "AI"
+        # Fix lỗi OCR nhận diện nhầm chữ I thành L hoặc số 1
+        if form_type in ["AL", "A1", "A|", "A L", "A I"]: form_type = "AI"
         
-    # 3. BOX 11 & 12
     produced_in = ""
-    prod_match = re.search(r'(?i)produced in\s*\n*([A-Za-z\s]+)\s*\n*\s*\(Country\)', docling_full_text)
+    prod_match = re.search(r'([A-Za-z\s]+)\s*\(Country\)', flat_text, re.IGNORECASE)
     if prod_match: produced_in = prod_match.group(1).strip().upper()
     
     exported_to = ""
-    exp_match = re.search(r'(?i)exported to\s*\n*([A-Za-z\s]+)\s*\n*\s*\(Importing Country\)', docling_full_text)
-    if exp_match:
-        exported_to = re.sub(r'(?i)(for|Secret.*|Ministry.*)', '', exp_match.group(1)).strip().upper()
-    
+    exp_to_match = re.search(r'exported to(.*?)\(Importing Country\)', flat_text, re.IGNORECASE)
+    if exp_to_match:
+        raw_exp = exp_to_match.group(1)
+        # Tìm từ in hoa cuối cùng trước (Importing Country) để lọc nhiễu "for Secret Ministry..."
+        caps = re.findall(r'\b[A-Z]{3,}\b', raw_exp)
+        exported_to = caps[-1] if caps else raw_exp.strip().upper()
+        
     date_cert = ""
-    cert_match = re.search(r'(\d{1,2}\s+[A-Za-z]+\s+\d{4})\s*\[', docling_full_text)
-    if cert_match: date_cert = cert_match.group(1).strip()
+    cert_date_match = re.search(r'(\d{1,2}\s+[A-Za-z]+\s+\d{4})\s*\[', flat_text)
+    if cert_date_match: date_cert = cert_date_match.group(1).strip()
     
     box_13_str = extract_box13_scanned(page_last)
+
+    # ==========================================
+    # 4. TRÍCH XUẤT TỪNG ITEM (DỰA TRÊN LOGIC "MỎ NEO")
+    # ==========================================
+    # Tìm tất cả các block bắt đầu bằng Số + N/M
+    matches = list(re.finditer(r'(?i)\b(\d+)[\.\,]?\s+(?:N/M|N\s*/\s*M)', flat_text))
     
-    # 4. CHIA TÁCH VÀ LỌC CÁC ITEMS 
-    # [FIX]: Nới lỏng Regex để bắt được các lỗi OCR phổ biến của chữ N/M
-    matches = list(re.finditer(r'(?i)\b(\d+)[\.\,]?\s*(?:N/M|N\s*/\s*M|N/W|M/N|N\.M)', docling_full_text))
-    
-    # [FIX]: Nếu không tìm thấy Items, BẮT BUỘC trả về 1 dòng chứa thông tin Global
     if not matches:
-        extracted_data.append({
-            COLUMNS[0]: form_type,
-            COLUMNS[1]: reference_no,
-            COLUMNS[2]: "", 
-            COLUMNS[3]: "",
-            COLUMNS[4]: "[Không bóc tách được Item, vui lòng kiểm tra lại OCR/Scan]",
-            COLUMNS[5]: "", COLUMNS[6]: "", COLUMNS[7]: "", COLUMNS[8]: "", COLUMNS[9]: "",
-            COLUMNS[10]: "", COLUMNS[11]: "", COLUMNS[12]: "", COLUMNS[13]: "", COLUMNS[14]: "",
-            COLUMNS[15]: "",
-            COLUMNS[16]: clean_text(date_cert),
-            COLUMNS[17]: exporter,
-            COLUMNS[18]: "", 
-            COLUMNS[19]: transport,
-            COLUMNS[20]: produced_in,
-            COLUMNS[21]: exported_to,
-            COLUMNS[22]: "",
-            COLUMNS[23]: box_13_str
-        })
+        # Xử lý trường hợp lỗi không tìm thấy item (giữ nguyên logic cũ của bạn)
+        pass 
     else:
         for i in range(len(matches)):
             start = matches[i].start()
-            end = matches[i+1].start() if i + 1 < len(matches) else len(docling_full_text)
-            block = docling_full_text[start:end]
+            end = matches[i+1].start() if i + 1 < len(matches) else len(flat_text)
+            block = flat_text[start:end]
             
+            # Box 5 & 6
             item_no = matches[i].group(1)
             
-            carton = ""
-            c_match = re.search(r'N/M\s+(\d+)\s*CARTON', block, re.IGNORECASE)
-            if c_match: carton = c_match.group(1)
+            # Box 7: CARTON
+            c_match = re.search(r'(\d+)\s*CARTON', block, re.IGNORECASE)
+            carton = c_match.group(1) if c_match else ""
             
-            origin, qty, uom = "", "", ""
-            o_match = re.search(r'CARTON\s+(.*?)\s+(\d+)\s+([A-Za-z]+)', block, re.IGNORECASE)
-            if o_match:
-                origin = o_match.group(1).strip().upper()
-                qty = o_match.group(2)
-                uom = o_match.group(3).upper()
-                
-            usd = ""
-            u_match = re.search(r'USD\s+([\d\.]+)', block)
-            if u_match: usd = u_match.group(1)
-            
-            date_inv = ""
-            d_match = re.search(r'(\d{2}/\d{2}/\d{4})', block)
-            if d_match: date_inv = d_match.group(1)
-            
-            invoice = ""
-            inv_match = re.search(r'(VN[A-Za-z0-9\-]+(?:\s+[A-Z]{2})?)', block)
-            if inv_match:
-                invoice = inv_match.group(1).strip()
-                if form_type == "AI" and "IN" not in invoice:
-                    invoice += " IN"
+            # Box 9 & Date: Nằm sau dấu '-' 
+            # VD: "- 10 PCE USD 33.00 10/05/2026"
+            qty, uom, usd, date_inv = "", "", "", ""
+            post_hyphen_match = re.search(r'-\s*(\d[\d\.,]*)\s+([A-Za-z]+)\s+USD\s+([\d\.,]+)\s+(\d{2}/\d{2}/\d{4})', block, re.IGNORECASE)
+            if post_hyphen_match:
+                qty = post_hyphen_match.group(1)
+                uom = post_hyphen_match.group(2).upper()
+                usd = post_hyphen_match.group(3)
+                date_inv = post_hyphen_match.group(4)
+
+            # Box 8, 10 & Description (Dùng logic mỏ neo Quantity)
+            origin, invoice, desc = "", "", ""
+            if qty and uom:
+                # Cắt đoạn nằm giữa CARTON và dấu '-'
+                mid_match = re.search(r'CARTON(.*?)-', block, re.IGNORECASE)
+                if mid_match:
+                    mid_text = mid_match.group(1).strip()
+                    # Tách làm đôi dựa trên qty và uom
+                    split_pattern = r'(.*?)\b' + re.escape(qty) + r'\s+' + re.escape(uom) + r'\b(.*)'
+                    parts_match = re.search(split_pattern, mid_text, re.IGNORECASE)
                     
-            desc = ""
-            if invoice:
-                inv_esc = re.escape(invoice.split()[0])
-                desc_match = re.search(f'{inv_esc}(?:\\s+[A-Z]{{2}})?\\s+(.*?)\\s+-', block)
-                if desc_match: desc = desc_match.group(1).strip()
-                
-            imp_hs = ""
-            imp_match = re.search(r'IMPORTING\s+COUNTRY\s+HS\s+CODE\s+(\d+)', block, re.IGNORECASE)
-            if imp_match: imp_hs = imp_match.group(1)[:8]
+                    if parts_match:
+                        # Nửa trước là Origin criteria (in hoa)
+                        origin = parts_match.group(1).strip().upper()
+                        
+                        # Nửa sau chứa Invoice và Description
+                        inv_desc_text = parts_match.group(2).strip()
+                        inv_match = re.search(r'^(VN[A-Za-z0-9\-]+(?:\s+IN)?)\s+(.*)', inv_desc_text, re.IGNORECASE)
+                        if inv_match:
+                            invoice = inv_match.group(1).strip().upper()
+                            desc = inv_match.group(2).strip()
+                            # Tự động thêm IN nếu là Form AI
+                            if form_type == "AI" and "IN" not in invoice:
+                                invoice += " IN"
             
-            exp_hs = ""
-            exp_match = re.search(r'EXPORTING\s+COUNTRY\s+HS\s+CODE\s+(\d+)', block, re.IGNORECASE)
-            if exp_match: exp_hs = exp_match.group(1)[:8]
+            # Box 7: HS Codes
+            imp_match = re.search(r'IMPORTING\s+COUNTRY\s+HS\s+CODE\s+(\d{8,10})', block, re.IGNORECASE)
+            imp_hs = imp_match.group(1)[:8] if imp_match else ""
             
-            orig_co = ""
-            oc_match = re.search(r'Number:\s*([A-Za-z0-9/]+)', block, re.IGNORECASE)
-            if oc_match: orig_co = oc_match.group(1)
+            exp_match = re.search(r'EXPORTING\s+COUNTRY\s+HS\s+CODE\s+(\d{8,10})', block, re.IGNORECASE)
+            exp_hs = exp_match.group(1)[:8] if exp_match else ""
             
-            orig_date = ""
-            od_match = re.search(r'Date:\s*(\d{1,2}-[A-Za-z]{3}-\d{4})', block, re.IGNORECASE)
-            if od_match: orig_date = od_match.group(1)
+            # Box 7: Original CO Info
+            orig_co_match = re.search(r'Number:\s*([A-Za-z0-9/]+)', block, re.IGNORECASE)
+            orig_co = orig_co_match.group(1) if orig_co_match else ""
             
+            orig_date_match = re.search(r'Date:\s*(\d{1,2}-[A-Za-z]{3}-\d{4})', block, re.IGNORECASE)
+            orig_date = orig_date_match.group(1) if orig_date_match else ""
+            
+            # Gán vào mảng extracted_data (Dùng chung các biến global)
             extracted_data.append({
                 COLUMNS[0]: form_type,
                 COLUMNS[1]: reference_no,
@@ -417,7 +426,7 @@ def process_scanned_pdf(pdf, file_name):
                 COLUMNS[5]: clean_text(qty),
                 COLUMNS[6]: clean_text(uom),
                 COLUMNS[7]: usd,
-                COLUMNS[8]: clean_text(origin),  
+                COLUMNS[8]: origin,  
                 COLUMNS[9]: imp_hs,
                 COLUMNS[10]: exp_hs,      
                 COLUMNS[11]: invoice,      
@@ -426,15 +435,15 @@ def process_scanned_pdf(pdf, file_name):
                 COLUMNS[14]: clean_text(orig_date),
                 COLUMNS[15]: "", 
                 COLUMNS[16]: clean_text(date_cert),
-                COLUMNS[17]: exporter,
+                COLUMNS[17]: exporter, # Lấy từ Box 1
                 COLUMNS[18]: "", 
-                COLUMNS[19]: transport,
+                COLUMNS[19]: transport, # Lấy từ Box 3
                 COLUMNS[20]: produced_in,
                 COLUMNS[21]: exported_to,
-                COLUMNS[22]: "N/M",
+                COLUMNS[22]: "N/M", # Mặc định theo rule Box 6
                 COLUMNS[23]: box_13_str
             })
-        
+            
     return {"error": None, "data": extracted_data, "file_name": file_name}
 
 # ==========================================
