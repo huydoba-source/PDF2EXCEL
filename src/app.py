@@ -17,12 +17,6 @@ from pytesseract import Output
 from PIL import Image, ImageDraw, ImageOps
 from docling.document_converter import DocumentConverter
 
-# [LƯU Ý]: Sửa lại đường dẫn Tesseract trên máy bạn nếu cần
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-
-# ==========================================
-# 1. CẤU HÌNH CỘT DỮ LIỆU ĐẦU RA 
-# ==========================================
 COLUMNS = [
     "Form",
     "Reference No",
@@ -62,20 +56,24 @@ def send_email_notification():
     SENDER_PASSWORD = "kwyv yjud qvhy ehiq" 
     RECEIVER_EMAIL = "huy.doba@decathlon.com" 
     
-    if "nhap_gmail_ao" in SENDER_EMAIL: return
+    if "nhap_gmail_ao" in SENDER_EMAIL:
+        return
 
     try:
         msg = MIMEMultipart()
         msg['From'] = f"Hệ thống Form E/D <{SENDER_EMAIL}>"
         msg['To'] = RECEIVER_EMAIL
         msg['Subject'] = "🚨 Thông báo: Có người truy cập Web Form E/D"
+        
         body = f"Chào Huy,\n\nVừa có một người dùng mới truy cập vào ứng dụng trích xuất PDF lúc {time.strftime('%Y-%m-%d %H:%M:%S')}."
         msg.attach(MIMEText(body, 'plain'))
+        
         server = smtplib.SMTP('smtp.gmail.com', 587)
         server.starttls()
         server.login(SENDER_EMAIL, SENDER_PASSWORD)
         server.send_message(msg)
         server.quit()
+        print("✅ Đã gửi email thông báo thành công!")
     except Exception as e:
         print(f"[!] Lỗi khi gửi email SMTP: {e}")
 
