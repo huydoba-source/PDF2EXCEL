@@ -264,9 +264,33 @@ def extract_box13_scanned(page):
 # Cần import thêm cache của Streamlit nếu chưa có ở đầu file (mặc dù bạn đã import streamlit as st)
 @st.cache_resource
 def get_docling_converter():
-    # Cache model để không bị tải lại RapidOCR liên tục mỗi trang PDF
-    from docling.document_converter import DocumentConverter
-    return DocumentConverter()
+    from docling.document_converter import DocumentConverter, PdfFormatOption
+    from docling.datamodel.pipeline_options import PdfPipelineOptions, TesseractCliOcrOptions
+    
+    # 1. Khởi tạo tùy chọn Pipeline cho PDF
+    pipeline_options = PdfPipelineOptions()
+
+    # 2. Bắt buộc bật OCR
+    pipeline_options.do_ocr = True 
+
+    # 3. Cấu hình OCR (Sử dụng Tesseract và ép quét toàn trang)
+    # LƯU Ý: Nếu chạy trên Streamlit Cloud (Linux) thì dùng '/usr/bin/tesseract'
+    # Nếu bạn test trên máy tính ở nhà (Windows) thì đổi thành r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+    pipeline_options.ocr_options = TesseractCliOcrOptions(
+        force_full_page_ocr=True,
+        tesseract_cmd='/usr/bin/tesseract' 
+    )
+
+    # 4. Tối ưu hóa việc nhận diện bảng biểu (Bỏ qua cấu trúc bảng để xuất text dạng phẳng)
+    pipeline_options.do_table_structure = False
+    pipeline_options.table_structure_options.do_cell_matching = False
+
+    # 5. Khởi tạo DocumentConverter với các tùy chọn trên
+    return DocumentConverter(
+        format_options={
+            "pdf": PdfFormatOption(pipeline_options=pipeline_options)
+        }
+    )
 
 def process_scanned_pdf(pdf, file_name):
     extracted_data = []
