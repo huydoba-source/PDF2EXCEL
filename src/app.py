@@ -709,8 +709,8 @@ def main():
         </div>
     """, unsafe_allow_html=True)
 
-    with st.container():
-        st.markdown('<div class="control-panel">', unsafe_allow_html=True)
+# Dùng border=True (hỗ trợ từ Streamlit 1.30+) để tạo khung viền thay cho div HTML
+    with st.container(border=True):
         st.markdown("<div class='badge'>⚙️ BẢNG ĐIỀU KHIỂN</div>", unsafe_allow_html=True)
         
         col1, col2, col3 = st.columns(3, gap="large")
@@ -718,27 +718,51 @@ def main():
 
         with col1:
             st.markdown("**1. Nguồn dữ liệu PDF**")
-            uploaded_files = st.file_uploader("Kéo thả File vào đây", type=["pdf"], accept_multiple_files=True, disabled=st.session_state.is_processing)
+            uploaded_files = st.file_uploader("Kéo thả File vào đây", type=["pdf"], accept_multiple_files=True, disabled=st.session_state.is_processing, label_visibility="collapsed")
             if uploaded_files:
                 st.session_state.pdf_files = uploaded_files
                 with st.expander("🛠️ Quản lý tệp (Bấm để xem)", expanded=True):
-                    with st.container(height=200):
-                        for f in st.session_state.pdf_files: st.markdown(f"📄 `{f.name}`")
-            else: st.session_state.pdf_files = []
+                    with st.container(height=150):
+                        for f in st.session_state.pdf_files: 
+                            # FIX: Dùng span HTML để ép màu xanh lá giống trong ảnh thay vì dùng markdown inline code
+                            st.markdown(f"📄 <span style='color: #10B981; font-family: monospace; font-weight: 600;'>{f.name}</span>", unsafe_allow_html=True)
+            else: 
+                st.session_state.pdf_files = []
 
         with col2:
             st.markdown("**2. Quá trình xử lý**")
             has_files = len(st.session_state.pdf_files) > 0
             if has_files:
                 if not st.session_state.is_processing:
-                    if st.button("🚀 BẮT ĐẦU TRÍCH XUẤT", type="primary"):
+                    # FIX: Thêm use_container_width=True
+                    if st.button("🚀 BẮT ĐẦU TRÍCH XUẤT", type="primary", use_container_width=True):
                         st.session_state.is_processing = True
                         reset_data_state()
                         st.rerun()
                 else:
-                    if st.button("🛑 Hủy tiến trình", type="secondary"): cancel_clicked = True
+                    if st.button("🛑 Hủy tiến trình", type="secondary", use_container_width=True): 
+                        cancel_clicked = True
             else:
-                st.button("🚀 BẮT ĐẦU TRÍCH XUẤT", type="primary", disabled=True)
+                st.button("🚀 BẮT ĐẦU TRÍCH XUẤT", type="primary", disabled=True, use_container_width=True)
+
+        with col3:
+            st.markdown("**3. Xuất kết quả**")
+            if st.session_state.extracted_data is not None:
+                df_result = pd.DataFrame(st.session_state.extracted_data, columns=COLUMNS)
+                numeric_cols = ["Item Number", "Quantity", "USD", "IMPORTING COUNTRY HS CODE", "EXPORTING COUNTRY HS CODE", "CARTON"]
+                for col in numeric_cols:
+                    if col in df_result.columns:
+                        df_result[col] = df_result[col].astype(str).str.replace(',', '')
+                        df_result[col] = pd.to_numeric(df_result[col], errors='coerce')
+                
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                    df_result.to_excel(writer, index=False, sheet_name="C_O_FormE")
+                
+                # FIX: Thêm use_container_width=True
+                st.download_button(label="📥 TẢI FILE EXCEL (.XLSX)", data=output.getvalue(), file_name="Decathlon_Data.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary", use_container_width=True)
+            else: 
+                st.button("📥 TẢI FILE EXCEL (.XLSX)", disabled=True, use_container_width=True)
 
         with col3:
             st.markdown("**3. Xuất kết quả**")
