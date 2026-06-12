@@ -374,41 +374,50 @@ def process_scanned_pdf(pdf, file_name):
             c_match = re.search(r'(\d+)\s*CARTON', block, re.IGNORECASE)
             carton = c_match.group(1) if c_match else ""
             
-            # Box 9 & Date: Lấy theo mốc dấu '-' và chữ USD
+            # Box 9 & Date: Lấy theo cụm USD và Date (Nới lỏng dấu gạch ngang và các loại dash)
             qty, uom, usd, date_inv = "", "", "", ""
-            post_hyphen_match = re.search(r'-\s*(\d[\d\.,]*)\s+([A-Za-z]+).*?USD\s+([\d\.,]+)\s+(\d{2}/\d{2}/\d{4})', block, re.IGNORECASE)
-            if post_hyphen_match:
-                qty = post_hyphen_match.group(1)
-                uom = post_hyphen_match.group(2).upper()
-                usd = post_hyphen_match.group(3)
-                date_inv = post_hyphen_match.group(4)
+            # Regex này cho phép dấu gạch là optional, hỗ trợ mọi loại dash (-, –, —, ~, _)
+            usd_pattern = r'(?:[-–—~_]\s*)?(\d[\d\.,]*)\s+([A-Za-z]{2,})\s+(?:USD|EUR|MYR|VND)\s*([\d\.,]+)\s+(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{4})'
+            usd_match = re.search(usd_pattern, block, re.IGNORECASE)
+            
+            if usd_match:
+                qty = usd_match.group(1)     # Lấy Quantity làm mỏ neo chính (VD: 36)
+                uom = usd_match.group(2).upper()
+                usd = usd_match.group(3)
+                date_inv = usd_match.group(4)
 
             # Box 8, 10 & Description
             origin, invoice, desc = "", "", ""
-            if qty and uom:
-                # Cắt đoạn nằm giữa CARTON và dấu '-'
-                mid_match = re.search(r'CARTON(.*?)-', block, re.IGNORECASE)
+            if qty:
+                # Tìm Quantity lần đầu tiên sau chữ CARTON để làm mỏ neo
+                # Cho phép UOM1 (PR) khác UOM2 (PCE)
+                mid_pattern = r'CARTON\s+(.*?)\b' + re.escape(qty) + r'\b\s+([A-Za-z]+)\s+(.*)'
+                mid_match = re.search(mid_pattern, block, re.IGNORECASE)
+                
                 if mid_match:
-                    mid_text = mid_match.group(1).strip()
-                    # Cắt đôi đoạn giữa bằng giá trị Quantity & UOM
-                    split_pattern = r'(.*?)\b' + re.escape(qty) + r'\s+' + re.escape(uom) + r'\b(.*)'
-                    parts_match = re.search(split_pattern, mid_text, re.IGNORECASE)
+                    origin = mid_match.group(1).strip().upper()
+                    inv_desc_text = mid_match.group(3).strip()
                     
-                    if parts_match:
-                        origin = parts_match.group(1).strip().upper()
-                        inv_desc_text = parts_match.group(2).strip()
-                        inv_match = re.search(r'^(VN[A-Za-z0-9\-]+(?:\s+IN)?)\s+(.*)', inv_desc_text, re.IGNORECASE)
-                        if inv_match:
-                            invoice = inv_match.group(1).strip().upper()
-                            desc = inv_match.group(2).strip()
-                            if form_type == "AI" and "IN" not in invoice:
-                                invoice += " IN"
-                                
-            # Xử lý trường hợp Origin bị rớt đuôi (VD: RVC 46.56% ... CTSH) nằm sau dấu '-'
-            tail_origin_match = re.search(r'-\s*(?:\d[\d\.,]*)\s+(?:[A-Za-z]+)\s+([A-Za-z\+]+)\s*USD', block, re.IGNORECASE)
-            if tail_origin_match:
-                origin = (origin + " " + tail_origin_match.group(1).strip().upper()).strip()
-
+                    # Tách Invoice Number và Description
+                    inv_match = re.search(r'^(VN[A-Za-z0-9\-]+(?:\s+IN)?)\s+(.*)', inv_desc_text, re.IGNORECASE)
+                    if inv_match:
+                        invoice = inv_match.group(1).strip().upper()
+                        desc = inv_match.group(2).strip()
+                        if form_type == "AI" and "IN" not in invoice:
+                            invoice += " IN"
+                    else:
+                        desc = inv_desc_text
+                    
+                    # Cắt bỏ phần cụm USD/FOB (Box 9) bị dính vào đuôi Description
+                    desc = re.sub(usd_pattern + r'.*', '', desc, flags=re.IGNORECASE)
+                    # Dọn dẹp dấu gạch ngang rác ở cuối Description
+                    desc = re.sub(r'[-–—~_]\s*$', '', desc).strip()
+                    
+                    # (Fallback) Bắt Origin criteria (như CTSH) nếu nó bị tách rớt xuống chót đuôi dòng
+                    tail_origin = re.search(usd_pattern + r'\s+([A-Z\+]{2,})', block, re.IGNORECASE)
+                    if tail_origin:
+                        origin = (origin + " " + tail_origin.group(5)).strip()
+                        
             # Box 7: HS Codes
             imp_match = re.search(r'IMPORTING\s+COUNTRY\s+HS\s+CODE\s+(\d{8,10})', block, re.IGNORECASE)
             imp_hs = imp_match.group(1)[:8] if imp_match else ""
