@@ -261,6 +261,13 @@ def extract_box13_scanned(page):
         print(f"Lỗi đọc Box 13 Scan: {e}")
         return "No"
 
+# Cần import thêm cache của Streamlit nếu chưa có ở đầu file (mặc dù bạn đã import streamlit as st)
+@st.cache_resource
+def get_docling_converter():
+    # Cache model để không bị tải lại RapidOCR liên tục mỗi trang PDF
+    from docling.document_converter import DocumentConverter
+    return DocumentConverter()
+
 def process_scanned_pdf(pdf, file_name):
     extracted_data = []
     page_first = pdf.pages[0]
@@ -283,8 +290,8 @@ def process_scanned_pdf(pdf, file_name):
     # 2. XỬ LÝ DOCLING HOẶC TESSERACT FALLBACK
     docling_full_text = ""
     try:
-        # Thử sử dụng Docling. Nếu lỗi Permission Denied ở Streamlit Cloud sẽ bắt Exception
-        converter = DocumentConverter()
+        # Sử dụng model Docling đã được cache để tiết kiệm RAM & CPU
+        converter = get_docling_converter()
         for i, p in enumerate(pdf.pages):
             temp_path = f"temp_scanned_page_{i}.png"
             p.to_image(resolution=300).original.save(temp_path)
@@ -297,7 +304,6 @@ def process_scanned_pdf(pdf, file_name):
         docling_full_text = "" 
         for i, p in enumerate(pdf.pages):
             img = p.to_image(resolution=300).original
-            # --psm 6 bảo toàn cấu trúc dòng chữ cực kỳ chuẩn xác, tương tự như output của Docling
             docling_full_text += "\n" + pytesseract.image_to_string(img, config='--oem 3 --psm 6')
         
     form_type = ""
@@ -323,89 +329,111 @@ def process_scanned_pdf(pdf, file_name):
     box_13_str = extract_box13_scanned(page_last)
     
     # 4. CHIA TÁCH VÀ LỌC CÁC ITEMS 
-    matches = list(re.finditer(r'\b(\d+)[\.\,]?\s+N/M', docling_full_text))
+    # [FIX]: Nới lỏng Regex để bắt được các lỗi OCR phổ biến của chữ N/M
+    matches = list(re.finditer(r'(?i)\b(\d+)[\.\,]?\s*(?:N/M|N\s*/\s*M|N/W|M/N|N\.M)', docling_full_text))
     
-    for i in range(len(matches)):
-        start = matches[i].start()
-        end = matches[i+1].start() if i + 1 < len(matches) else len(docling_full_text)
-        block = docling_full_text[start:end]
-        
-        item_no = matches[i].group(1)
-        
-        carton = ""
-        c_match = re.search(r'N/M\s+(\d+)\s*CARTON', block, re.IGNORECASE)
-        if c_match: carton = c_match.group(1)
-        
-        origin, qty, uom = "", "", ""
-        o_match = re.search(r'CARTON\s+(.*?)\s+(\d+)\s+([A-Za-z]+)', block, re.IGNORECASE)
-        if o_match:
-            origin = o_match.group(1).strip().upper()
-            qty = o_match.group(2)
-            uom = o_match.group(3).upper()
-            
-        usd = ""
-        u_match = re.search(r'USD\s+([\d\.]+)', block)
-        if u_match: usd = u_match.group(1)
-        
-        date_inv = ""
-        d_match = re.search(r'(\d{2}/\d{2}/\d{4})', block)
-        if d_match: date_inv = d_match.group(1)
-        
-        invoice = ""
-        inv_match = re.search(r'(VN[A-Za-z0-9\-]+(?:\s+[A-Z]{2})?)', block)
-        if inv_match:
-            invoice = inv_match.group(1).strip()
-            if form_type == "AI" and "IN" not in invoice:
-                invoice += " IN"
-                
-        desc = ""
-        if invoice:
-            inv_esc = re.escape(invoice.split()[0])
-            desc_match = re.search(f'{inv_esc}(?:\\s+[A-Z]{{2}})?\\s+(.*?)\\s+-', block)
-            if desc_match: desc = desc_match.group(1).strip()
-            
-        imp_hs = ""
-        imp_match = re.search(r'IMPORTING\s+COUNTRY\s+HS\s+CODE\s+(\d+)', block, re.IGNORECASE)
-        if imp_match: imp_hs = imp_match.group(1)[:8]
-        
-        exp_hs = ""
-        exp_match = re.search(r'EXPORTING\s+COUNTRY\s+HS\s+CODE\s+(\d+)', block, re.IGNORECASE)
-        if exp_match: exp_hs = exp_match.group(1)[:8]
-        
-        orig_co = ""
-        oc_match = re.search(r'Number:\s*([A-Za-z0-9/]+)', block, re.IGNORECASE)
-        if oc_match: orig_co = oc_match.group(1)
-        
-        orig_date = ""
-        od_match = re.search(r'Date:\s*(\d{1,2}-[A-Za-z]{3}-\d{4})', block, re.IGNORECASE)
-        if od_match: orig_date = od_match.group(1)
-        
+    # [FIX]: Nếu không tìm thấy Items, BẮT BUỘC trả về 1 dòng chứa thông tin Global
+    if not matches:
         extracted_data.append({
             COLUMNS[0]: form_type,
             COLUMNS[1]: reference_no,
-            COLUMNS[2]: clean_text(orig_co),
-            COLUMNS[3]: item_no,
-            COLUMNS[4]: clean_text(desc),
-            COLUMNS[5]: clean_text(qty),
-            COLUMNS[6]: clean_text(uom),
-            COLUMNS[7]: usd,
-            COLUMNS[8]: clean_text(origin),  
-            COLUMNS[9]: imp_hs,
-            COLUMNS[10]: exp_hs,      
-            COLUMNS[11]: invoice,      
-            COLUMNS[12]: date_inv,        
-            COLUMNS[13]: clean_text(carton),
-            COLUMNS[14]: clean_text(orig_date),
-            COLUMNS[15]: "", 
+            COLUMNS[2]: "", 
+            COLUMNS[3]: "",
+            COLUMNS[4]: "[Không bóc tách được Item, vui lòng kiểm tra lại OCR/Scan]",
+            COLUMNS[5]: "", COLUMNS[6]: "", COLUMNS[7]: "", COLUMNS[8]: "", COLUMNS[9]: "",
+            COLUMNS[10]: "", COLUMNS[11]: "", COLUMNS[12]: "", COLUMNS[13]: "", COLUMNS[14]: "",
+            COLUMNS[15]: "",
             COLUMNS[16]: clean_text(date_cert),
             COLUMNS[17]: exporter,
             COLUMNS[18]: "", 
             COLUMNS[19]: transport,
             COLUMNS[20]: produced_in,
             COLUMNS[21]: exported_to,
-            COLUMNS[22]: "N/M",
+            COLUMNS[22]: "",
             COLUMNS[23]: box_13_str
         })
+    else:
+        for i in range(len(matches)):
+            start = matches[i].start()
+            end = matches[i+1].start() if i + 1 < len(matches) else len(docling_full_text)
+            block = docling_full_text[start:end]
+            
+            item_no = matches[i].group(1)
+            
+            carton = ""
+            c_match = re.search(r'N/M\s+(\d+)\s*CARTON', block, re.IGNORECASE)
+            if c_match: carton = c_match.group(1)
+            
+            origin, qty, uom = "", "", ""
+            o_match = re.search(r'CARTON\s+(.*?)\s+(\d+)\s+([A-Za-z]+)', block, re.IGNORECASE)
+            if o_match:
+                origin = o_match.group(1).strip().upper()
+                qty = o_match.group(2)
+                uom = o_match.group(3).upper()
+                
+            usd = ""
+            u_match = re.search(r'USD\s+([\d\.]+)', block)
+            if u_match: usd = u_match.group(1)
+            
+            date_inv = ""
+            d_match = re.search(r'(\d{2}/\d{2}/\d{4})', block)
+            if d_match: date_inv = d_match.group(1)
+            
+            invoice = ""
+            inv_match = re.search(r'(VN[A-Za-z0-9\-]+(?:\s+[A-Z]{2})?)', block)
+            if inv_match:
+                invoice = inv_match.group(1).strip()
+                if form_type == "AI" and "IN" not in invoice:
+                    invoice += " IN"
+                    
+            desc = ""
+            if invoice:
+                inv_esc = re.escape(invoice.split()[0])
+                desc_match = re.search(f'{inv_esc}(?:\\s+[A-Z]{{2}})?\\s+(.*?)\\s+-', block)
+                if desc_match: desc = desc_match.group(1).strip()
+                
+            imp_hs = ""
+            imp_match = re.search(r'IMPORTING\s+COUNTRY\s+HS\s+CODE\s+(\d+)', block, re.IGNORECASE)
+            if imp_match: imp_hs = imp_match.group(1)[:8]
+            
+            exp_hs = ""
+            exp_match = re.search(r'EXPORTING\s+COUNTRY\s+HS\s+CODE\s+(\d+)', block, re.IGNORECASE)
+            if exp_match: exp_hs = exp_match.group(1)[:8]
+            
+            orig_co = ""
+            oc_match = re.search(r'Number:\s*([A-Za-z0-9/]+)', block, re.IGNORECASE)
+            if oc_match: orig_co = oc_match.group(1)
+            
+            orig_date = ""
+            od_match = re.search(r'Date:\s*(\d{1,2}-[A-Za-z]{3}-\d{4})', block, re.IGNORECASE)
+            if od_match: orig_date = od_match.group(1)
+            
+            extracted_data.append({
+                COLUMNS[0]: form_type,
+                COLUMNS[1]: reference_no,
+                COLUMNS[2]: clean_text(orig_co),
+                COLUMNS[3]: item_no,
+                COLUMNS[4]: clean_text(desc),
+                COLUMNS[5]: clean_text(qty),
+                COLUMNS[6]: clean_text(uom),
+                COLUMNS[7]: usd,
+                COLUMNS[8]: clean_text(origin),  
+                COLUMNS[9]: imp_hs,
+                COLUMNS[10]: exp_hs,      
+                COLUMNS[11]: invoice,      
+                COLUMNS[12]: date_inv,        
+                COLUMNS[13]: clean_text(carton),
+                COLUMNS[14]: clean_text(orig_date),
+                COLUMNS[15]: "", 
+                COLUMNS[16]: clean_text(date_cert),
+                COLUMNS[17]: exporter,
+                COLUMNS[18]: "", 
+                COLUMNS[19]: transport,
+                COLUMNS[20]: produced_in,
+                COLUMNS[21]: exported_to,
+                COLUMNS[22]: "N/M",
+                COLUMNS[23]: box_13_str
+            })
         
     return {"error": None, "data": extracted_data, "file_name": file_name}
 
