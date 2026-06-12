@@ -458,7 +458,35 @@ def process_scanned_pdf(pdf, file_name):
                 COLUMNS[22]: "N/M",
                 COLUMNS[23]: box_13_str
             })
+# ... (Phần append dữ liệu vào extracted_data ở trên) ...
             
+    # ==========================================
+    # ĐOẠN CODE BẠN YÊU CẦU: PRINT LOG KIỂM TRA
+    # ==========================================
+    print(f"\n" + "="*70)
+    print(f"📊 KẾT QUẢ TRÍCH XUẤT TỪ DOCLING/OCR CHO FILE: {file_name} (SCAN)")
+    print("="*70)
+    
+    if not extracted_data:
+        print("[!] Không có dữ liệu nào được trích xuất.")
+    else:
+        for idx, row in enumerate(extracted_data):
+            # Lấy Item Number để hiển thị tiêu đề, nếu lỗi không có thì báo N/A
+            item_id = row.get("Item Number", "N/A")
+            print(f"\n📦 --- Dòng hàng hóa thứ {idx + 1} (Item No: {item_id}) ---")
+            
+            for key, value in row.items():
+                # Chỉ in ra terminal những cột thực sự có dữ liệu để tránh rối mắt
+                if value and str(value).strip() != "":
+                    # Cắt ngắn chuỗi nếu nội dung quá dài (ví dụ Box 13)
+                    display_value = str(value)
+                    if len(display_value) > 100:
+                        display_value = display_value[:97] + "..."
+                    print(f"   + {key}: {display_value}")
+                    
+    print("="*70 + "\n")
+
+    # (Dòng return giữ nguyên của bạn)
     return {"error": None, "data": extracted_data, "file_name": file_name}
 
 # ==========================================
