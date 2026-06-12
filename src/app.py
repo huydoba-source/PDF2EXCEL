@@ -349,59 +349,66 @@ def process_scanned_pdf(pdf, file_name):
     # 4. TRÍCH XUẤT TỪNG ITEM (DỰA TRÊN LOGIC "MỎ NEO")
     # ==========================================
     # Tìm tất cả các block bắt đầu bằng Số + N/M
-    matches = list(re.finditer(r'(?i)\b(\d+)[\.\,]?\s+(?:N/M|N\s*/\s*M)', flat_text))
+matches = list(re.finditer(r'(?i)(?:N/M|N\s*/\s*M|N/W|M/N|N\.M)', flat_text))
     
     if not matches:
-        # Xử lý trường hợp lỗi không tìm thấy item (giữ nguyên logic cũ của bạn)
-        pass 
+        # BẮT BUỘC tạo 1 dòng báo lỗi để bảng Excel/UI hiển thị cho User biết
+        extracted_data.append({
+            COLUMNS[0]: form_type, COLUMNS[1]: reference_no, COLUMNS[2]: "", COLUMNS[3]: "",
+            COLUMNS[4]: "[Lỗi OCR] Không tìm thấy ký tự N/M để tách dòng hàng hóa. Vui lòng kiểm tra lại file Scan.",
+            COLUMNS[5]: "", COLUMNS[6]: "", COLUMNS[7]: "", COLUMNS[8]: "", COLUMNS[9]: "",
+            COLUMNS[10]: "", COLUMNS[11]: "", COLUMNS[12]: "", COLUMNS[13]: "", COLUMNS[14]: "",
+            COLUMNS[15]: "", COLUMNS[16]: clean_text(date_cert), COLUMNS[17]: exporter, COLUMNS[18]: "", 
+            COLUMNS[19]: transport, COLUMNS[20]: produced_in, COLUMNS[21]: exported_to, COLUMNS[22]: "", COLUMNS[23]: box_13_str
+        })
     else:
         for i in range(len(matches)):
             start = matches[i].start()
             end = matches[i+1].start() if i + 1 < len(matches) else len(flat_text)
             block = flat_text[start:end]
             
-            # Box 5 & 6
-            item_no = matches[i].group(1)
+            # Áp dụng logic của bạn: Tự động đánh số thứ tự 1, 2, 3...
+            item_no = str(i + 1)
             
             # Box 7: CARTON
             c_match = re.search(r'(\d+)\s*CARTON', block, re.IGNORECASE)
             carton = c_match.group(1) if c_match else ""
             
-            # Box 9 & Date: Nằm sau dấu '-' 
-            # VD: "- 10 PCE USD 33.00 10/05/2026"
+            # Box 9 & Date: Lấy theo mốc dấu '-' và chữ USD
             qty, uom, usd, date_inv = "", "", "", ""
-            post_hyphen_match = re.search(r'-\s*(\d[\d\.,]*)\s+([A-Za-z]+)\s+USD\s+([\d\.,]+)\s+(\d{2}/\d{2}/\d{4})', block, re.IGNORECASE)
+            post_hyphen_match = re.search(r'-\s*(\d[\d\.,]*)\s+([A-Za-z]+).*?USD\s+([\d\.,]+)\s+(\d{2}/\d{2}/\d{4})', block, re.IGNORECASE)
             if post_hyphen_match:
                 qty = post_hyphen_match.group(1)
                 uom = post_hyphen_match.group(2).upper()
                 usd = post_hyphen_match.group(3)
                 date_inv = post_hyphen_match.group(4)
 
-            # Box 8, 10 & Description (Dùng logic mỏ neo Quantity)
+            # Box 8, 10 & Description
             origin, invoice, desc = "", "", ""
             if qty and uom:
                 # Cắt đoạn nằm giữa CARTON và dấu '-'
                 mid_match = re.search(r'CARTON(.*?)-', block, re.IGNORECASE)
                 if mid_match:
                     mid_text = mid_match.group(1).strip()
-                    # Tách làm đôi dựa trên qty và uom
+                    # Cắt đôi đoạn giữa bằng giá trị Quantity & UOM
                     split_pattern = r'(.*?)\b' + re.escape(qty) + r'\s+' + re.escape(uom) + r'\b(.*)'
                     parts_match = re.search(split_pattern, mid_text, re.IGNORECASE)
                     
                     if parts_match:
-                        # Nửa trước là Origin criteria (in hoa)
                         origin = parts_match.group(1).strip().upper()
-                        
-                        # Nửa sau chứa Invoice và Description
                         inv_desc_text = parts_match.group(2).strip()
                         inv_match = re.search(r'^(VN[A-Za-z0-9\-]+(?:\s+IN)?)\s+(.*)', inv_desc_text, re.IGNORECASE)
                         if inv_match:
                             invoice = inv_match.group(1).strip().upper()
                             desc = inv_match.group(2).strip()
-                            # Tự động thêm IN nếu là Form AI
                             if form_type == "AI" and "IN" not in invoice:
                                 invoice += " IN"
-            
+                                
+            # Xử lý trường hợp Origin bị rớt đuôi (VD: RVC 46.56% ... CTSH) nằm sau dấu '-'
+            tail_origin_match = re.search(r'-\s*(?:\d[\d\.,]*)\s+(?:[A-Za-z]+)\s+([A-Za-z\+]+)\s*USD', block, re.IGNORECASE)
+            if tail_origin_match:
+                origin = (origin + " " + tail_origin_match.group(1).strip().upper()).strip()
+
             # Box 7: HS Codes
             imp_match = re.search(r'IMPORTING\s+COUNTRY\s+HS\s+CODE\s+(\d{8,10})', block, re.IGNORECASE)
             imp_hs = imp_match.group(1)[:8] if imp_match else ""
@@ -416,7 +423,6 @@ def process_scanned_pdf(pdf, file_name):
             orig_date_match = re.search(r'Date:\s*(\d{1,2}-[A-Za-z]{3}-\d{4})', block, re.IGNORECASE)
             orig_date = orig_date_match.group(1) if orig_date_match else ""
             
-            # Gán vào mảng extracted_data (Dùng chung các biến global)
             extracted_data.append({
                 COLUMNS[0]: form_type,
                 COLUMNS[1]: reference_no,
@@ -435,12 +441,12 @@ def process_scanned_pdf(pdf, file_name):
                 COLUMNS[14]: clean_text(orig_date),
                 COLUMNS[15]: "", 
                 COLUMNS[16]: clean_text(date_cert),
-                COLUMNS[17]: exporter, # Lấy từ Box 1
+                COLUMNS[17]: exporter,
                 COLUMNS[18]: "", 
-                COLUMNS[19]: transport, # Lấy từ Box 3
+                COLUMNS[19]: transport,
                 COLUMNS[20]: produced_in,
                 COLUMNS[21]: exported_to,
-                COLUMNS[22]: "N/M", # Mặc định theo rule Box 6
+                COLUMNS[22]: "N/M",
                 COLUMNS[23]: box_13_str
             })
             
