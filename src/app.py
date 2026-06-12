@@ -349,7 +349,7 @@ def process_scanned_pdf(pdf, file_name):
     # 4. TRÍCH XUẤT TỪNG ITEM (DỰA TRÊN LOGIC "MỎ NEO")
     # ==========================================
     # Tìm tất cả các block bắt đầu bằng Số + N/M
-matches = list(re.finditer(r'(?i)(?:N/M|N\s*/\s*M|N/W|M/N|N\.M)', flat_text))
+    matches = list(re.finditer(r'(?i)(?:N/M|N\s*/\s*M|N/W|M/N|N\.M)', flat_text))
     
     if not matches:
         # BẮT BUỘC tạo 1 dòng báo lỗi để bảng Excel/UI hiển thị cho User biết
