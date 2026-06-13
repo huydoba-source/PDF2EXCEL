@@ -306,25 +306,32 @@ def process_scanned_pdf(pdf, file_name):
     # ==========================================
     # 2. TRÍCH XUẤT BOX 3 (TÌM MỐC NGÀY THÁNG ĐẦU TIÊN)
     # ==========================================
+# ==========================================
+    # 2. TRÍCH XUẤT BOX 3 (TÌM MỐC NGÀY THÁNG & XÓA TIÊU ĐỀ)
+    # ==========================================
     box3_img = page_first.crop((0, 160, 300, 315)).to_image(resolution=300).original
     box3_text = pytesseract.image_to_string(box3_img).strip()
+    
+    # 1. Dọn dẹp khoảng trắng
     b3_clean = re.sub(r'\s+', ' ', box3_text).strip()
     
+    # 2. Xóa TOÀN BỘ các danh mục/tiêu đề của Box 3 bất kể trường hợp nào
+    b3_clean = re.sub(r'(?i)3\.?\s*Means of transport.*?\)', '', b3_clean)
+    b3_clean = re.sub(r'(?i)Departure Date\s*[:;]?', '', b3_clean)
+    b3_clean = re.sub(r'(?i)Vessel[\'’]?s?\s*Name/?Aircraft[^:]*[:;]?', '', b3_clean)
+    b3_clean = re.sub(r'(?i)Port of Discharge\s*[:;]?', '', b3_clean)
+    
+    # 3. Lấy dữ liệu bắt đầu bằng ngày tháng (DD MM YYYY)
     transport = ""
-    # Cắt từ cụm ngày tháng (VD: 14 May 2026) đến hết chuỗi
     transport_match = re.search(r'(\d{1,2}\s+[A-Za-z]+\s+\d{4}.*)', b3_clean, re.IGNORECASE)
     if transport_match:
         transport = transport_match.group(1).strip()
     else:
         # Fallback nếu OCR bị mờ không đọc được ngày tháng
-        b3_clean = re.sub(r'(?i)3\.?\s*Means of transport.*?\)', '', b3_clean)
-        b3_clean = re.sub(r'(?i)Departure Date\s*[:;]?', '', b3_clean)
-        b3_clean = re.sub(r'(?i)Vessel[\'’]?s?\s*Name/Aircraft[^:]*[:;]?', '', b3_clean)
-        b3_clean = re.sub(r'(?i)Port of Discharge\s*[:;]?', '', b3_clean)
         transport = b3_clean.strip()
-    
-    # Reference No: Lấy theo tên file
-    reference_no = file_name.replace(".pdf", "")
+        
+    # Xoá bớt khoảng trắng dư thừa (nếu có) do việc xóa tiêu đề để lại
+    transport = re.sub(r'\s+', ' ', transport).strip()
     
     # ==========================================
     # 3. LẤY TEXT TỪ DOCLING VÀ LÀM PHẲNG
