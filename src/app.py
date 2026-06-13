@@ -298,27 +298,36 @@ def process_scanned_pdf(pdf, file_name):
     page_last = pdf.pages[-1]
     
     # ==========================================
-    # 1. TRÍCH XUẤT BOX 1 & BOX 3 (DÙNG TESSERACT & TỌA ĐỘ)
+    # 1. HARDCODE BOX 1 & BOX 2 THEO YÊU CẦU MỚI
     # ==========================================
-    box1_img = page_first.crop((0, 0, 290, 110)).to_image(resolution=300).original
-    box1_text = pytesseract.image_to_string(box1_img).strip()
-    # Loại bỏ danh mục Box 1, chỉ lấy nội dung
-    exporter = re.sub(r'(?is)^\s*1\.?\s*Goods consigned.*?(?:country\))', '', box1_text).strip()
+    exporter = "DECATHLON LOGISTICS MALAYSIA SDN. BHD.\nPLOT D40 & D44\nJALAN DPB/8, ZONE B\nPELABUHAN TANJUNG PELEPAS\n81560 GELANG PATAH, JOHOR, MALAYSIA"
+    consignee = "DECATHLON VIETNAM CO., LTD\nPAX SKY BUILDING, 5TH FLOOR\n26 UNG VAN KHIEM, WARD 25,\nBINH THANH DISTRICT\n700000 HO CHI MINH CITY VIETNAM"
     
+    # ==========================================
+    # 2. TRÍCH XUẤT BOX 3 (TÌM MỐC NGÀY THÁNG ĐẦU TIÊN)
+    # ==========================================
     box3_img = page_first.crop((0, 160, 300, 315)).to_image(resolution=300).original
     box3_text = pytesseract.image_to_string(box3_img).strip()
-    # Loại bỏ các danh mục Box 3
-    b3_clean = re.sub(r'(?i)3\.?\s*Means of transport.*?\)', '', box3_text)
-    b3_clean = re.sub(r'(?i)Departure Date\s*[:;]?', '', b3_clean)
-    b3_clean = re.sub(r'(?i)Vessel[\'’]?s?\s*Name/Aircraft[^:]*[:;]?', '', b3_clean)
-    b3_clean = re.sub(r'(?i)Port of Discharge\s*[:;]?', '', b3_clean)
-    transport = re.sub(r'\s+', ' ', b3_clean).strip()
+    b3_clean = re.sub(r'\s+', ' ', box3_text).strip()
+    
+    transport = ""
+    # Cắt từ cụm ngày tháng (VD: 14 May 2026) đến hết chuỗi
+    transport_match = re.search(r'(\d{1,2}\s+[A-Za-z]+\s+\d{4}.*)', b3_clean, re.IGNORECASE)
+    if transport_match:
+        transport = transport_match.group(1).strip()
+    else:
+        # Fallback nếu OCR bị mờ không đọc được ngày tháng
+        b3_clean = re.sub(r'(?i)3\.?\s*Means of transport.*?\)', '', b3_clean)
+        b3_clean = re.sub(r'(?i)Departure Date\s*[:;]?', '', b3_clean)
+        b3_clean = re.sub(r'(?i)Vessel[\'’]?s?\s*Name/Aircraft[^:]*[:;]?', '', b3_clean)
+        b3_clean = re.sub(r'(?i)Port of Discharge\s*[:;]?', '', b3_clean)
+        transport = b3_clean.strip()
     
     # Reference No: Lấy theo tên file
     reference_no = file_name.replace(".pdf", "")
     
     # ==========================================
-    # 2. LẤY TEXT TỪ DOCLING VÀ LÀM PHẲNG
+    # 3. LẤY TEXT TỪ DOCLING VÀ LÀM PHẲNG
     # ==========================================
     docling_full_text = ""
     try:
@@ -327,7 +336,6 @@ def process_scanned_pdf(pdf, file_name):
             temp_path = f"temp_scanned_page_{i}.png"
             p.to_image(resolution=300).original.save(temp_path)
             res = converter.convert(temp_path)
-            # Dùng markdown để lấy cấu trúc, nhưng sau đó sẽ làm phẳng
             docling_full_text += "\n" + res.document.export_to_markdown()
             if os.path.exists(temp_path): os.remove(temp_path)
     except Exception as e:
@@ -337,52 +345,61 @@ def process_scanned_pdf(pdf, file_name):
             docling_full_text += "\n" + pytesseract.image_to_string(img, config='--oem 3 --psm 6')
 
     # [QUAN TRỌNG]: LÀM PHẲNG TEXT
-    # Chuyển đổi toàn bộ dấu xuống dòng (\n) và dấu gạch đứng của bảng Markdown (|) thành khoảng trắng
     flat_text = re.sub(r'[\n\|]', ' ', docling_full_text)
     flat_text = re.sub(r'\s+', ' ', flat_text).strip()
 
     # ==========================================
-    # 3. TRÍCH XUẤT CÁC TRƯỜNG DÙNG CHUNG (GLOBAL FIELDS)
+    # 4. TRÍCH XUẤT CÁC TRƯỜNG DÙNG CHUNG (GLOBAL FIELDS)
     # ==========================================
     form_type = ""
     form_match = re.search(r'(?i)FORM\s*([A-Za-z0-9]+)', flat_text)
     if form_match:
         form_type = form_match.group(1).upper()
-        # Fix lỗi OCR nhận diện nhầm chữ I thành L hoặc số 1
         if form_type in ["AL", "A1", "A|", "A L", "A I"]: form_type = "AI"
         
+    # --- LOGIC MỚI: PRODUCED IN & EXPORTED TO ---
     produced_in = ""
-    prod_match = re.search(r'([A-Za-z\s]+)\s*\(Country\)', flat_text, re.IGNORECASE)
-    if prod_match: produced_in = prod_match.group(1).strip().upper()
-    
     exported_to = ""
-    exp_to_match = re.search(r'exported to(.*?)\(Importing Country\)', flat_text, re.IGNORECASE)
-    if exp_to_match:
-        raw_exp = exp_to_match.group(1)
-        # Tìm từ in hoa cuối cùng trước (Importing Country) để lọc nhiễu "for Secret Ministry..."
-        caps = re.findall(r'\b[A-Z]{3,}\b', raw_exp)
-        exported_to = caps[-1] if caps else raw_exp.strip().upper()
+    if form_type == "AI":
+        produced_in = "INDIA"
+        exported_to = "VIETNAM"
+    else:
+        # Nếu là các Form khác (D, E...), vẫn giữ logic quét OCR như cũ
+        prod_match = re.search(r'([A-Za-z\s]+)\s*\(Country\)', flat_text, re.IGNORECASE)
+        if prod_match: produced_in = prod_match.group(1).strip().upper()
         
+        exp_to_match = re.search(r'exported to(.*?)\(Importing Country\)', flat_text, re.IGNORECASE)
+        if exp_to_match:
+            raw_exp = exp_to_match.group(1)
+            caps = re.findall(r'\b[A-Z]{3,}\b', raw_exp)
+            exported_to = caps[-1] if caps else raw_exp.strip().upper()
+            
+    # --- LOGIC MỚI: DATE OF CERTIFICATION ---
     date_cert = ""
+    # Tìm mốc ngày tháng nằm trước dấu '[' (Ví dụ: 18 May 2026 [FAI...)
     cert_date_match = re.search(r'(\d{1,2}\s+[A-Za-z]+\s+\d{4})\s*\[', flat_text)
-    if cert_date_match: date_cert = cert_date_match.group(1).strip()
+    if not cert_date_match:
+        # Fallback tìm các định dạng ngày / - .
+        cert_date_match = re.search(r'(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{4})', flat_text[-500:])
+        
+    if cert_date_match:
+        # Hàm format_to_dd_mm_yyyy mặc định trả về DD-MM-YYYY, ta dùng replace để đổi '-' thành '/'
+        date_cert = format_to_dd_mm_yyyy(cert_date_match.group(1).strip()).replace("-", "/")
     
     box_13_str = extract_box13_scanned(page_last)
 
     # ==========================================
-    # 4. TRÍCH XUẤT TỪNG ITEM (DỰA TRÊN LOGIC "MỎ NEO")
+    # 5. TRÍCH XUẤT TỪNG ITEM (DỰA TRÊN LOGIC "MỎ NEO")
     # ==========================================
-    # Tìm tất cả các block bắt đầu bằng Số + N/M
     matches = list(re.finditer(r'(?i)(?:N/M|N\s*/\s*M|N/W|M/N|N\.M)', flat_text))
     
     if not matches:
-        # BẮT BUỘC tạo 1 dòng báo lỗi để bảng Excel/UI hiển thị cho User biết
         extracted_data.append({
             COLUMNS[0]: form_type, COLUMNS[1]: reference_no, COLUMNS[2]: "", COLUMNS[3]: "",
             COLUMNS[4]: "[Lỗi OCR] Không tìm thấy ký tự N/M để tách dòng hàng hóa. Vui lòng kiểm tra lại file Scan.",
             COLUMNS[5]: "", COLUMNS[6]: "", COLUMNS[7]: "", COLUMNS[8]: "", COLUMNS[9]: "",
             COLUMNS[10]: "", COLUMNS[11]: "", COLUMNS[12]: "", COLUMNS[13]: "", COLUMNS[14]: "",
-            COLUMNS[15]: "", COLUMNS[16]: clean_text(date_cert), COLUMNS[17]: exporter, COLUMNS[18]: "", 
+            COLUMNS[15]: "", COLUMNS[16]: date_cert, COLUMNS[17]: exporter, COLUMNS[18]: consignee, 
             COLUMNS[19]: transport, COLUMNS[20]: produced_in, COLUMNS[21]: exported_to, COLUMNS[22]: "", COLUMNS[23]: box_13_str
         })
     else:
@@ -391,21 +408,19 @@ def process_scanned_pdf(pdf, file_name):
             end = matches[i+1].start() if i + 1 < len(matches) else len(flat_text)
             block = flat_text[start:end]
             
-            # Áp dụng logic của bạn: Tự động đánh số thứ tự 1, 2, 3...
             item_no = str(i + 1)
             
             # Box 7: CARTON
             c_match = re.search(r'(\d+)\s*CARTON', block, re.IGNORECASE)
             carton = c_match.group(1) if c_match else ""
             
-            # Box 9 & Date: Lấy theo cụm USD và Date (Nới lỏng dấu gạch ngang và các loại dash)
+            # Box 9 & Date: Lấy theo cụm USD và Date
             qty, uom, usd, date_inv = "", "", "", ""
-            # Regex này cho phép dấu gạch là optional, hỗ trợ mọi loại dash (-, –, —, ~, _)
             usd_pattern = r'(?:[-–—~_]\s*)?(\d[\d\.,]*)\s+([A-Za-z]{2,})\s+(?:USD|EUR|MYR|VND)\s*([\d\.,]+)\s+(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{4})'
             usd_match = re.search(usd_pattern, block, re.IGNORECASE)
             
             if usd_match:
-                qty = usd_match.group(1)     # Lấy Quantity làm mỏ neo chính (VD: 36)
+                qty = usd_match.group(1)
                 uom = usd_match.group(2).upper()
                 usd = usd_match.group(3)
                 date_inv = usd_match.group(4)
@@ -413,8 +428,6 @@ def process_scanned_pdf(pdf, file_name):
             # Box 8, 10 & Description
             origin, invoice, desc = "", "", ""
             if qty:
-                # Tìm Quantity lần đầu tiên sau chữ CARTON để làm mỏ neo
-                # Cho phép UOM1 (PR) khác UOM2 (PCE)
                 mid_pattern = r'CARTON\s+(.*?)\b' + re.escape(qty) + r'\b\s+([A-Za-z]+)\s+(.*)'
                 mid_match = re.search(mid_pattern, block, re.IGNORECASE)
                 
@@ -422,7 +435,6 @@ def process_scanned_pdf(pdf, file_name):
                     origin = mid_match.group(1).strip().upper()
                     inv_desc_text = mid_match.group(3).strip()
                     
-                    # Tách Invoice Number và Description
                     inv_match = re.search(r'^(VN[A-Za-z0-9\-]+(?:\s+IN)?)\s+(.*)', inv_desc_text, re.IGNORECASE)
                     if inv_match:
                         invoice = inv_match.group(1).strip().upper()
@@ -432,12 +444,9 @@ def process_scanned_pdf(pdf, file_name):
                     else:
                         desc = inv_desc_text
                     
-                    # Cắt bỏ phần cụm USD/FOB (Box 9) bị dính vào đuôi Description
                     desc = re.sub(usd_pattern + r'.*', '', desc, flags=re.IGNORECASE)
-                    # Dọn dẹp dấu gạch ngang rác ở cuối Description
                     desc = re.sub(r'[-–—~_]\s*$', '', desc).strip()
                     
-                    # (Fallback) Bắt Origin criteria (như CTSH) nếu nó bị tách rớt xuống chót đuôi dòng
                     tail_origin = re.search(usd_pattern + r'\s+([A-Z\+]{2,})', block, re.IGNORECASE)
                     if tail_origin:
                         origin = (origin + " " + tail_origin.group(5)).strip()
@@ -473,16 +482,15 @@ def process_scanned_pdf(pdf, file_name):
                 COLUMNS[13]: clean_text(carton),
                 COLUMNS[14]: clean_text(orig_date),
                 COLUMNS[15]: "", 
-                COLUMNS[16]: clean_text(date_cert),
+                COLUMNS[16]: date_cert, 
                 COLUMNS[17]: exporter,
-                COLUMNS[18]: "", 
+                COLUMNS[18]: consignee, 
                 COLUMNS[19]: transport,
                 COLUMNS[20]: produced_in,
                 COLUMNS[21]: exported_to,
                 COLUMNS[22]: "N/M",
                 COLUMNS[23]: box_13_str
             })
-# ... (Phần append dữ liệu vào extracted_data ở trên) ...
             
     # ==========================================
     # ĐOẠN CODE BẠN YÊU CẦU: PRINT LOG KIỂM TRA
@@ -495,14 +503,11 @@ def process_scanned_pdf(pdf, file_name):
         print("[!] Không có dữ liệu nào được trích xuất.")
     else:
         for idx, row in enumerate(extracted_data):
-            # Lấy Item Number để hiển thị tiêu đề, nếu lỗi không có thì báo N/A
             item_id = row.get("Item Number", "N/A")
             print(f"\n📦 --- Dòng hàng hóa thứ {idx + 1} (Item No: {item_id}) ---")
             
             for key, value in row.items():
-                # Chỉ in ra terminal những cột thực sự có dữ liệu để tránh rối mắt
                 if value and str(value).strip() != "":
-                    # Cắt ngắn chuỗi nếu nội dung quá dài (ví dụ Box 13)
                     display_value = str(value)
                     if len(display_value) > 100:
                         display_value = display_value[:97] + "..."
@@ -510,7 +515,6 @@ def process_scanned_pdf(pdf, file_name):
                     
     print("="*70 + "\n")
 
-    # (Dòng return giữ nguyên của bạn)
     return {"error": None, "data": extracted_data, "file_name": file_name}
 
 # ==========================================
