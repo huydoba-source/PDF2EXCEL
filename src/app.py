@@ -430,8 +430,11 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             exp_match = re.search(r'(?i)EXPORTING\s+COUNTRY\s+HS\s+CODE\s+(\d{10})', block)
             exp_hs = exp_match.group(1)[:8] if exp_match else ""
             
-            # DOTALL + Bỏ qua mọi khoảng trắng, dấu phẩy, dấu hai chấm, dấu gạch ngang sau chữ Number
-            orig_match = re.search(r'(?is)CO\s+Reference\s+Number[\s:,\-]*\n*(.*?)(?=\n*Issuance|\n*Date|\n*Page|$)', block)
+            # [LOGIC MỚI]: Khắc phục lỗi chữ "Onginal", dấu "-" thừa, kẹp dính chữ và XÓA MỌI KHOẢNG TRẮNG
+            orig_match = re.search(
+                r'(?s)[Cc][Oo]\s+[Rr]eference\s+[Nn]umber[\s:,\-]*\n*(.*?)(?=[A-Z]?[a-z]|\[|\b[Ii][Ss][Ss][Uu][Aa][Nn][Cc][Ee]\b|\b[Dd][Aa][Tt][Ee]\b|\b[Pp][Aa][Gg][Ee]\b|\b[Tt][Oo][Tt][Aa][Ll]\b|$)', 
+                block
+            )
             orig_co = ""
             if orig_match:
                 orig_co_raw = orig_match.group(1).strip()
