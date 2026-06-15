@@ -415,8 +415,8 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             exp_match = re.search(r'(?i)EXPORTING\s+COUNTRY\s+HS\s+CODE\s+(\d{10})', block)
             exp_hs = exp_match.group(1)[:8] if exp_match else ""
             
-            # Khắc phục lỗi chữ "Onginal", "Orginal" VÀ XÓA MỌI KHOẢNG TRẮNG BỊ OCR CẮT ĐỨT
-            orig_match = re.search(r'(?i)CO\s+Reference\s+Number:\s*\n*(.*?)(?=\n|Issuance|Page|$)', block)
+            # [LOGIC MỚI]: Khắc phục lỗi chữ "Onginal", dấu "-" thừa VÀ XÓA MỌI KHOẢNG TRẮNG OCR
+            orig_match = re.search(r'(?is)CO\s+Reference\s+Number[\s:,\-]*\n*(.*?)(?=\n*Issuance|\n*Page|$)', block)
             orig_co = ""
             if orig_match:
                 orig_co_raw = orig_match.group(1).strip()
