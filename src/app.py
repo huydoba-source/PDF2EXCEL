@@ -16,7 +16,10 @@ import fitz  # PyMuPDF
 import pytesseract
 from pytesseract import Output
 from PIL import Image, ImageDraw, ImageOps
+import logging
 
+# 1. Configure logging level (Required to see info/debug logs on cloud hosts)
+logging.basicConfig(level=logging.INFO)
 # [LƯU Ý]: Nếu chạy trên máy tính Windows thì đổi thành r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
 
@@ -465,21 +468,21 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
     # ==========================================
     # ĐOẠN CODE IN LOG KIỂM TRA
     # ==========================================
-    print(f"\n" + "="*70)
-    print(f"📊 KẾT QUẢ TRÍCH XUẤT (PyMuPDF + Tesseract) FILE: {file_name}")
-    print("="*70)
+    logging.info(f"\n" + "="*70)
+    logging.info(f"📊 KẾT QUẢ TRÍCH XUẤT (PyMuPDF + Tesseract) FILE: {file_name}")
+    logging.info("="*70)
     
     if not extracted_data:
         print("[!] Không có dữ liệu nào được trích xuất.")
     else:
         for idx, row in enumerate(extracted_data):
             item_id = row.get("Item Number", "N/A")
-            print(f"\n📦 --- Dòng hàng hóa thứ {idx + 1} (Item No: {item_id}) ---")
+            logging.info(f"\n📦 --- Dòng hàng hóa thứ {idx + 1} (Item No: {item_id}) ---")
             for key, value in row.items():
                 if value and str(value).strip() != "":
                     display_value = str(value)
                     if len(display_value) > 100: display_value = display_value[:97] + "..."
-                    print(f"   + {key}: {display_value}")
+                    logging.info(f"   + {key}: {display_value}")
     print("="*70 + "\n")
 
     return {"error": None, "data": extracted_data, "file_name": file_name}
