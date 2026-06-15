@@ -221,9 +221,6 @@ def extract_box13_scanned(page):
 # ==========================================
 # 2. XỬ LÝ FILE SCAN BẰNG FITZ (PyMuPDF) + TESSERACT THEO TỌA ĐỘ
 # ==========================================
-# ==========================================
-# 2. XỬ LÝ FILE SCAN BẰNG FITZ (PyMuPDF) + TESSERACT THEO TỌA ĐỘ
-# ==========================================
 def process_scanned_pdf(pdf, file_bytes, file_name):
     extracted_data = []
     
@@ -345,7 +342,6 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             item_no = str(i + 1)
             
             # --- LOGIC 1: BẮT MỎ NEO "USD" VÀ "DATE" ---
-            # Bắt số bất chấp việc có dấu '-' hay không, bỏ qua nhiễu dòng
             qty, uom, usd, date_inv, origin_extra = "", "", "", "", ""
             usd_start_idx = -1
             
@@ -361,31 +357,39 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
                 usd_start_idx = usd_match.start() # Lấy vị trí để tìm Description
 
             # --- LOGIC 2: BẮT MỎ NEO "CARTON" ĐỂ LẤY CARTON, ORIGIN VÀ INVOICE ---
-            c_match = re.search(r'(\d+)\s*CARTON', block, re.IGNORECASE)
+            # Bỏ qua chữ cái bị thừa giữa Số và CARTON (Ví dụ: 1S CARTON -> Lấy 1)
+            c_match = re.search(r'(\d+)[A-Za-z]*\s*CARTON', block, re.IGNORECASE)
             carton = c_match.group(1) if c_match else ""
             
             origin, invoice, invoice_raw = "", "", ""
             inv_end_idx = -1
             
-            carton_line_match = re.search(r'(?m)^.*?(?:N/M|N\s*/\s*M).*?\d+\s*CARTON\s+(.*?)$', block, re.IGNORECASE)
+            carton_line_match = re.search(r'(?m)^.*?(?:N/M|N\s*/\s*M).*?\d+[A-Za-z]*\s*CARTON\s+(.*?)$', block, re.IGNORECASE)
             if carton_line_match:
                 rest_of_line = carton_line_match.group(1).strip()
                 
-                # Tìm mã Invoice (Bắt lỗi OCR JN, [N, |IN...)
-                vn_match = re.search(r'(VN[A-Z0-9\-]+(?:\s*(?:IN|JN|I\}|\|IN|\[N))?)', rest_of_line, re.IGNORECASE)
+                # Tìm mã Invoice (Bắt lỗi OCR JN, [N, |IN..., và bắt cả YN thay vì VN)
+                vn_match = re.search(r'([VY]N[A-Z0-9\-]+(?:\s*(?:IN|JN|I\}|\|IN|\[N))?)', rest_of_line, re.IGNORECASE)
                 if vn_match:
                     invoice_raw = vn_match.group(1)
-                    base_inv = re.search(r'(VN[A-Z0-9\-]+)', invoice_raw).group(1)
+                    base_inv = re.search(r'([VY]N[A-Z0-9\-]+)', invoice_raw, re.IGNORECASE).group(1).upper()
                     
+                    # Sửa lỗi YN -> VN
+                    if base_inv.startswith("YN"):
+                        base_inv = "VN" + base_inv[2:]
+                        
                     # Chuẩn hóa đuôi IN
                     invoice_clean = re.sub(r'(?i)(JN|I\}|\|IN|\[N)$', 'IN', invoice_raw).upper()
+                    if invoice_clean.startswith("YN"):
+                        invoice_clean = "VN" + invoice_clean[2:]
+                        
                     if form_type == "AI" and not invoice_clean.endswith("IN"):
                         invoice = base_inv + " IN"
                     else:
                         invoice = invoice_clean
                         
                     # Lưu lại vị trí để cắt Description
-                    inv_end_idx = block.find(invoice_raw) + len(invoice_raw)
+                    inv_end_idx = block.find(vn_match.group(1)) + len(vn_match.group(1))
                     
                     # Origin là tất cả text nằm trước cụm (Số + Đơn vị tính)
                     before_inv = rest_of_line[:vn_match.start()].strip()
