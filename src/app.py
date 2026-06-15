@@ -5,31 +5,48 @@ import os
 import io
 import re
 import time
+import requests  
+import pdfplumber
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 # --- THƯ VIỆN BỔ SUNG CHO OCR ---
-import pdfplumber
-import fitz  # PyMuPDF
 import pytesseract
 from pytesseract import Output
 from PIL import Image
 
-# [LƯU Ý]: Sửa lại đường dẫn Tesseract trên máy bạn nếu cần (Windows thì dùng C:\...)
+# [LƯU Ý]: Nếu chạy trên máy tính Windows thì đổi thành r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
 
 # ==========================================
 # 1. CẤU HÌNH CỘT DỮ LIỆU ĐẦU RA 
 # ==========================================
 COLUMNS = [
-    "Form", "Reference No", "Original CO Reference Number", "Item Number",
-    "English description", "Quantity", "UOM", "USD", "Origin criteria (see Overleaf Notes)",
-    "IMPORTING COUNTRY HS CODE", "EXPORTING COUNTRY HS CODE", "Invoice Number",
-    "Date of invoices", "CARTON", "Original CO Issuance Date", "Issuing Authority",
-    "Date of certification", "Products consigned from (Exporter's business name, address, country)",
-    "Products consigned to (Consignee's name, address, country)", "Means of transport and route (as far as known)",
-    "Produced in", "Exported to", "Marks and numbers on packages", "Box 13"
+    "Form",
+    "Reference No",
+    "Original CO Reference Number",
+    "Item Number",
+    "English description",
+    "Quantity",
+    "UOM",
+    "USD",
+    "Origin criteria (see Overleaf Notes)",
+    "IMPORTING COUNTRY HS CODE",
+    "EXPORTING COUNTRY HS CODE",
+    "Invoice Number",
+    "Date of invoices",
+    "CARTON",
+    "Original CO Issuance Date",
+    "Issuing Authority",
+    "Date of certification",
+    "Products consigned from (Exporter's business name, address, country)",
+    "Products consigned to (Consignee's name, address, country)",
+    "Means of transport and route (as far as known)",
+    "Produced in",
+    "Exported to",
+    "Marks and numbers on packages",
+    "Box 13"
 ]
 
 DECATHLON_BLUE = "#0082C3"
@@ -91,7 +108,7 @@ def clean_text(text):
     return text.strip() if re.search(r'[A-Za-z0-9]', text) else ""
 
 # ==========================================
-# XỬ LÝ BOX 13 BẰNG PDFPLUMBER VÀ TESSERACT
+# XỬ LÝ ĐẶC BIỆT CHO BOX 13 SCAN
 # ==========================================
 def extract_box13_scanned(page):
     try:
@@ -146,7 +163,6 @@ def extract_box13_scanned(page):
                     x_box_start = max(0, x_box_end - box_size)
                     y_box_start = max(0, start_word['top'] - int((box_size - h_word) / 2))
                     y_box_end = y_box_start + box_size
-
                     cb_img = img.crop((x_box_start, y_box_start, x_box_end, y_box_end))
                     gray_box = cb_img.convert("L")
                     pixels = list(gray_box.get_flattened_data()) if hasattr(gray_box, 'get_flattened_data') else list(gray_box.getdata())
@@ -183,7 +199,6 @@ def extract_box13_scanned(page):
                     h_word = start_word['h']
                     y_box_start = max(0, start_word['top'] - int((box_size - h_word) / 2))
                     y_box_end = y_box_start + box_size
-
                     cb_img = img.crop((x_box_start, y_box_start, x_box_end, y_box_end))
                     gray_box = cb_img.convert("L")
                     pixels = list(gray_box.get_flattened_data()) if hasattr(gray_box, 'get_flattened_data') else list(gray_box.getdata())
@@ -200,7 +215,7 @@ def extract_box13_scanned(page):
         return "No"
 
 # ==========================================
-# 2. XỬ LÝ FILE SCAN BẰNG FITZ (PyMuPDF) + TESSERACT
+# 2. XỬ LÝ FILE SCAN BẰNG pdfplumber (PyMuPDF) + TESSERACT THEO TỌA ĐỘ
 # ==========================================
 def process_scanned_pdf(pdf, file_bytes, file_name):
     extracted_data = []
@@ -209,28 +224,54 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
     exporter = "DECATHLON LOGISTICS MALAYSIA SDN. BHD.\nPLOT D40 & D44\nJALAN DPB/8, ZONE B\nPELABUHAN TANJUNG PELEPAS\n81560 GELANG PATAH, JOHOR, MALAYSIA"
     consignee = "DECATHLON VIETNAM CO., LTD\nPAX SKY BUILDING, 5TH FLOOR\n26 UNG VAN KHIEM, WARD 25,\nBINH THANH DISTRICT\n700000 HO CHI MINH CITY VIETNAM"
     
-    # Reference No lấy theo tên file
     reference_no = file_name.replace(".pdf", "")
     
-    # Mở PDF bằng PyMuPDF (fitz)
-    with fitz.open(stream=file_bytes, filetype="pdf") as doc:
+    # Mở PDF bằng PyMuPDF để crop theo tọa độ chuẩn xác
+    with pdfplumber.open(stream=file_bytes, filetype="pdf") as doc:
         page_first = doc[0]
         
-        # ZOOM chung cho OCR
+        # ZOOM chuẩn 300 DPI cho OCR Tesseract
         zoom = 300 / 72
-        mat = fitz.Matrix(zoom, zoom)
+        mat = pdfplumber.Matrix(zoom, zoom)
         tess_config = r'--oem 3 --psm 6'
 
         # ---------------------------------------------------------
-        # 2. TRÍCH XUẤT BOX 3 (TÌM MỐC NGÀY THÁNG & XÓA TIÊU ĐỀ)
+        # LẤY THÔNG TIN GLOBAL TỪ TRANG ĐẦU (Tọa độ: Top)
         # ---------------------------------------------------------
-        box3_rect = fitz.Rect(0, 160, 300, 315)
+        top_rect = pdfplumber.Rect(0, 0, page_first.rect.width, 300)
+        pix_top = page_first.get_pixmap(matrix=mat, clip=top_rect)
+        img_top = Image.frombytes("RGB", [pix_top.width, pix_top.height], pix_top.samples) if not pix_top.alpha else Image.frombytes("RGBA", [pix_top.width, pix_top.height], pix_top.samples).convert("RGB")
+        top_text = pytesseract.image_to_string(img_top, config=tess_config).strip()
+        top_flat = re.sub(r'[\n\|]', ' ', top_text)
+
+        form_type = ""
+        form_match = re.search(r'(?i)FORM\s*([A-Za-z0-9]+)', top_flat)
+        if form_match:
+            form_type = form_match.group(1).upper()
+            if form_type in ["AL", "A1", "A|", "A L", "A I"]: form_type = "AI"
+
+        produced_in, exported_to = "", ""
+        if form_type == "AI":
+            produced_in = "INDIA"
+            exported_to = "VIETNAM"
+        else:
+            prod_match = re.search(r'([A-Za-z\s]+)\s*\(Country\)', top_flat, re.IGNORECASE)
+            if prod_match: produced_in = prod_match.group(1).strip().upper()
+            exp_to_match = re.search(r'exported to(.*?)\(Importing Country\)', top_flat, re.IGNORECASE)
+            if exp_to_match:
+                raw_exp = exp_to_match.group(1)
+                caps = re.findall(r'\b[A-Z]{3,}\b', raw_exp)
+                exported_to = caps[-1] if caps else raw_exp.strip().upper()
+
+        # ---------------------------------------------------------
+        # TRÍCH XUẤT BOX 3 (XÓA TIÊU ĐỀ, TÌM NGÀY THÁNG)
+        # ---------------------------------------------------------
+        box3_rect = pdfplumber.Rect(0, 160, 300, 315)
         pix3 = page_first.get_pixmap(matrix=mat, clip=box3_rect)
         img3 = Image.frombytes("RGB", [pix3.width, pix3.height], pix3.samples) if not pix3.alpha else Image.frombytes("RGBA", [pix3.width, pix3.height], pix3.samples).convert("RGB")
         
-        box3_text = pytesseract.image_to_string(img3, config=tess_config).strip()
-        b3_clean = re.sub(r'\s+', ' ', box3_text).strip()
-        
+        b3_clean = pytesseract.image_to_string(img3, config=tess_config).strip()
+        b3_clean = re.sub(r'\s+', ' ', b3_clean).strip()
         b3_clean = re.sub(r'(?i)3\.?\s*Means of transport.*?\)', '', b3_clean)
         b3_clean = re.sub(r'(?i)Departure Date\s*[:;]?', '', b3_clean)
         b3_clean = re.sub(r'(?i)Vessel[\'’]?s?\s*Name[/\\]?Aircraft.*?etc\.?[:;]?', '', b3_clean)
@@ -238,16 +279,14 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
         
         transport = ""
         transport_match = re.search(r'(\d{1,2}\s+[A-Za-z]+\s+\d{4}.*)', b3_clean, re.IGNORECASE)
-        if transport_match:
-            transport = transport_match.group(1).strip()
-        else:
-            transport = b3_clean.strip()
+        if transport_match: transport = transport_match.group(1).strip()
+        else: transport = b3_clean.strip()
         transport = re.sub(r'\s+', ' ', transport).strip()
 
         # ---------------------------------------------------------
-        # 3. TRÍCH XUẤT DATE OF CERTIFICATION
+        # TRÍCH XUẤT DATE OF CERTIFICATION (THEO TỌA ĐỘ BẠN CẤP)
         # ---------------------------------------------------------
-        cert_rect = fitz.Rect(0, 550, page_first.rect.width, page_first.rect.height)
+        cert_rect = pdfplumber.Rect(0, 550, page_first.rect.width, page_first.rect.height)
         pix_cert = page_first.get_pixmap(matrix=mat, clip=cert_rect)
         img_cert = Image.frombytes("RGB", [pix_cert.width, pix_cert.height], pix_cert.samples) if not pix_cert.alpha else Image.frombytes("RGBA", [pix_cert.width, pix_cert.height], pix_cert.samples).convert("RGB")
         cert_text = pytesseract.image_to_string(img_cert, config=tess_config).strip()
@@ -258,7 +297,8 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             date_cert = cert_match.group(1).strip()
 
         # ---------------------------------------------------------
-        # 4. TRÍCH XUẤT VÙNG MAIN TEXT TỪ TẤT CẢ CÁC TRANG
+        # TRÍCH XUẤT VÙNG HÀNG HÓA TỪ TẤT CẢ CÁC TRANG 
+        # Tọa độ: y1=300 đến y2=height-180
         # ---------------------------------------------------------
         main_text = ""
         for page in doc:
@@ -269,98 +309,86 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             
             if y2 <= y1: continue
             
-            main_rect = fitz.Rect(x1, y1, x2, y2)
+            main_rect = pdfplumber.Rect(x1, y1, x2, y2)
             pix_main = page.get_pixmap(matrix=mat, clip=main_rect)
             img_main = Image.frombytes("RGB", [pix_main.width, pix_main.height], pix_main.samples) if not pix_main.alpha else Image.frombytes("RGBA", [pix_main.width, pix_main.height], pix_main.samples).convert("RGB")
             
             main_text += "\n" + pytesseract.image_to_string(img_main, config=tess_config)
-
-    # ---------------------------------------------------------
-    # 5. XỬ LÝ CÁC TRƯỜNG DÙNG CHUNG FORM & QUỐC GIA
-    # ---------------------------------------------------------
-    form_type = ""
-    form_match = re.search(r'(?i)FORM\s*([A-Za-z0-9]+)', main_text)
-    if form_match:
-        form_type = form_match.group(1).upper()
-        if form_type in ["AL", "A1", "A|", "A L", "A I"]: form_type = "AI"
-        
-    produced_in = ""
-    exported_to = ""
-    if form_type == "AI":
-        produced_in = "INDIA"
-        exported_to = "VIETNAM"
-    else:
-        prod_match = re.search(r'([A-Za-z\s]+)\s*\(Country\)', main_text, re.IGNORECASE)
-        if prod_match: produced_in = prod_match.group(1).strip().upper()
-        exp_to_match = re.search(r'exported to(.*?)\(Importing Country\)', main_text, re.IGNORECASE)
-        if exp_to_match:
-            raw_exp = exp_to_match.group(1)
-            caps = re.findall(r'\b[A-Z]{3,}\b', raw_exp)
-            exported_to = caps[-1] if caps else raw_exp.strip().upper()
             
+    # Box 13 xử lý bằng hàm cũ
     box_13_str = extract_box13_scanned(pdf.pages[-1])
 
     # ---------------------------------------------------------
-    # 6. TRÍCH XUẤT TỪNG ITEM VỚI LOGIC REGEX CAO CẤP
+    # 5. CẮT BLOCK VÀ ÁP DỤNG LOGIC MỚI TỪNG ITEM
     # ---------------------------------------------------------
-    # Pattern gộp 2 dòng: Dòng CARTON và Dòng Description/Qty/USD/Date
-    item_pattern = r'(?:^|\n)[^\n]*?(?:N/M|N\s*/\s*M|N/W|M/N|N\.M)[^\n]*?(\d+)\s*CARTON\s+([^\n]*?)\s+(\d[\d\.,]*)\s+([A-Za-z]+)\s+([A-Za-z0-9\-]+[^\n]*)\n(.*?)\s+-\s*(\d[\d\.,]*)\s+([A-Za-z]+)(.*?)\s+USD\s+([\d\.,]+)\s+(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{4})'
-    
-    matches = list(re.finditer(item_pattern, main_text, flags=re.IGNORECASE | re.DOTALL))
+    matches = list(re.finditer(r'(?i)(?:N/M|N\s*/\s*M|N/W|M/N|N\.M)', main_text))
     
     if not matches:
         extracted_data.append({
             COLUMNS[0]: form_type, COLUMNS[1]: reference_no, COLUMNS[2]: "", COLUMNS[3]: "",
-            COLUMNS[4]: "[Lỗi OCR] Không tìm thấy dữ liệu Item. Vui lòng kiểm tra lại file Scan.",
-            COLUMNS[5]: "", COLUMNS[6]: "", COLUMNS[7]: "", COLUMNS[8]: "", COLUMNS[9]: "",
-            COLUMNS[10]: "", COLUMNS[11]: "", COLUMNS[12]: "", COLUMNS[13]: "", COLUMNS[14]: "",
-            COLUMNS[15]: "", COLUMNS[16]: date_cert, COLUMNS[17]: exporter, COLUMNS[18]: consignee, 
-            COLUMNS[19]: transport, COLUMNS[20]: produced_in, COLUMNS[21]: exported_to, COLUMNS[22]: "", COLUMNS[23]: box_13_str
+            COLUMNS[4]: "[Lỗi OCR] Không tìm thấy dữ liệu Item.", COLUMNS[5]: "", COLUMNS[6]: "", 
+            COLUMNS[7]: "", COLUMNS[8]: "", COLUMNS[9]: "", COLUMNS[10]: "", COLUMNS[11]: "", 
+            COLUMNS[12]: "", COLUMNS[13]: "", COLUMNS[14]: "", COLUMNS[15]: "", COLUMNS[16]: date_cert, 
+            COLUMNS[17]: exporter, COLUMNS[18]: consignee, COLUMNS[19]: transport, COLUMNS[20]: produced_in, 
+            COLUMNS[21]: exported_to, COLUMNS[22]: "", COLUMNS[23]: box_13_str
         })
     else:
         for i in range(len(matches)):
-            match = matches[i]
+            start = matches[i].start()
+            end = matches[i+1].start() if i + 1 < len(matches) else len(main_text)
+            block = main_text[start:end]
+            
             item_no = str(i + 1)
+            qty, uom, usd, date_inv, desc, origin_extra = "", "", "", "", "", ""
             
-            carton = match.group(1)
-            origin_1 = match.group(2).strip().upper()
-            qty = match.group(7)    # Lấy Qty ở dòng 2 làm chuẩn
-            uom = match.group(8).upper()
-            invoice_raw = match.group(5).strip().upper()
-            desc = match.group(6).strip()
-            origin_2 = match.group(9).strip().upper()
-            usd = match.group(10)
-            date_inv = match.group(11)
+            # --- LOGIC MỚI: TÌM DÒNG CHỨA DẤU '-' ĐỂ LẤY DESC, QTY, UOM, USD, DATE ---
+            dash_line_match = re.search(r'(?m)^([^\n]+?)\s*-\s*(\d[\d\.,]*)\s+([A-Za-z]+)(.*?)\s*USD\s+([\d\.,]+)\s+(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{4})', block, re.IGNORECASE)
+            if dash_line_match:
+                desc = dash_line_match.group(1).strip()         # Nằm trước dấu '-'
+                qty = dash_line_match.group(2).strip()          # Số sau dấu '-'
+                uom = dash_line_match.group(3).strip().upper()  # Ngay sau Quantity
+                origin_extra = dash_line_match.group(4).strip() # VD: CTSH (bị rớt đuôi)
+                usd = dash_line_match.group(5).strip()          # Số sau USD
+                date_inv = dash_line_match.group(6).strip()     # DD/MM/YYYY
+
+            # --- LOGIC MỚI: TÌM DÒNG CARTON ĐỂ LẤY CARTON, ORIGIN, INVOICE ---
+            c_match = re.search(r'(\d+)\s*CARTON', block, re.IGNORECASE)
+            carton = c_match.group(1) if c_match else ""
             
-            # Xử lý Origin Criteria bị tách dòng
-            origin = origin_1
-            if origin_2: origin += " " + origin_2
-            
-            # Xử lý Invoice Number
-            vn_match = re.search(r'(VN[A-Z0-9\-]+)', invoice_raw)
-            if vn_match:
-                invoice = vn_match.group(1)
-            else:
-                invoice = invoice_raw.split()[0]
+            origin, invoice = "", ""
+            carton_line_match = re.search(r'(?m)^.*?(?:N/M|N\s*/\s*M).*?\d+\s*CARTON\s+(.*?)$', block, re.IGNORECASE)
+            if carton_line_match and qty and uom:
+                rest_of_line = carton_line_match.group(1).strip()
                 
-            if form_type == "AI":
-                invoice += " IN"
-                
-            # Xử lý Description
-            desc = re.sub(r'\s+', ' ', desc).strip()
+                # Tách Origin và Invoice bằng cụm (Qty UOM) làm mỏ neo
+                split_match = re.search(r'^(.*?)\b' + re.escape(qty) + r'\s+' + re.escape(uom) + r'\b(.*)$', rest_of_line, re.IGNORECASE)
+                if split_match:
+                    origin = split_match.group(1).strip().upper()
+                    invoice_raw = split_match.group(2).strip().upper()
+                    
+                    # Logic Invoice Number (thêm IN nếu cần)
+                    vn_match = re.search(r'(VN[A-Z0-9\-]+)', invoice_raw)
+                    if vn_match:
+                        base_inv = vn_match.group(1)
+                        if form_type == "AI" and not invoice_raw.endswith("IN"):
+                            invoice = base_inv + " IN"
+                        else:
+                            invoice = invoice_raw
+                    else:
+                        invoice = invoice_raw
+                        if form_type == "AI" and "IN" not in invoice: invoice += " IN"
             
-            # Để lấy Original CO, Issuance Date và HS Codes an toàn cho từng Item,
-            # Ta chia nhỏ đoạn text xung quanh Item đó (từ cuối Item trước đến đầu Item sau)
-            start_idx = matches[i-1].end() if i > 0 else 0
-            end_idx = matches[i+1].start() if i + 1 < len(matches) else len(main_text)
-            block = main_text[start_idx:end_idx]
+            # Gộp Origin bị rớt đuôi (như CTSH)
+            if origin_extra: origin = (origin + " " + origin_extra).strip()
             
-            imp_match = re.search(r'(?i)IMPORTING\s+COUNTRY\s+HS\s+CODE\s+(\d{8,10})', block)
+            # --- LOGIC HS CODES (10 SỐ -> LẤY 8) ---
+            imp_match = re.search(r'(?i)IMPORTING\s+COUNTRY\s+HS\s+CODE\s+(\d{10})', block)
             imp_hs = imp_match.group(1)[:8] if imp_match else ""
             
-            exp_match = re.search(r'(?i)EXPORTING\s+COUNTRY\s+HS\s+CODE\s+(\d{8,10})', block)
+            exp_match = re.search(r'(?i)EXPORTING\s+COUNTRY\s+HS\s+CODE\s+(\d{10})', block)
             exp_hs = exp_match.group(1)[:8] if exp_match else ""
             
+            # --- LOGIC ORIGINAL CO & ISSUANCE DATE ---
             orig_match = re.search(r'(?i)Original\s+CO\s+Reference\s+Number:\s*\n*([A-Za-z0-9/]+)', block)
             orig_co = orig_match.group(1) if orig_match else ""
             
@@ -593,7 +621,7 @@ def process_single_pdf(file_data):
             if not first_page_text or len(first_page_text.strip()) < 50:
                 if "scanned_files_detected" in st.session_state:
                     st.session_state.scanned_files_detected.append(file_name)
-                # Đã update chữ ký hàm để pass cả pdf, file_bytes
+                # Đã update chữ ký hàm để xử lý file bytes cho PyMuPDF
                 return process_scanned_pdf(pdf, file_bytes, file_name)
 
             # LUỒNG CHO FILE CÓ TEXT LAYER
