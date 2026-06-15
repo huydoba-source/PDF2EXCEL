@@ -357,7 +357,6 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
                 usd_start_idx = usd_match.start() # Lấy vị trí để tìm Description
 
             # --- LOGIC 2: BẮT MỎ NEO "CARTON" ĐỂ LẤY CARTON, ORIGIN VÀ INVOICE ---
-            # Bỏ qua chữ cái bị thừa giữa Số và CARTON (Ví dụ: 1S CARTON -> Lấy 1)
             c_match = re.search(r'(\d+)[A-Za-z]*\s*CARTON', block, re.IGNORECASE)
             carton = c_match.group(1) if c_match else ""
             
@@ -368,17 +367,15 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             if carton_line_match:
                 rest_of_line = carton_line_match.group(1).strip()
                 
-                # Tìm mã Invoice (Bắt lỗi OCR JN, [N, |IN..., và bắt cả YN thay vì VN)
+                # Tìm mã Invoice
                 vn_match = re.search(r'([VY]N[A-Z0-9\-]+(?:\s*(?:IN|JN|I\}|\|IN|\[N))?)', rest_of_line, re.IGNORECASE)
                 if vn_match:
                     invoice_raw = vn_match.group(1)
                     base_inv = re.search(r'([VY]N[A-Z0-9\-]+)', invoice_raw, re.IGNORECASE).group(1).upper()
                     
-                    # Sửa lỗi YN -> VN
                     if base_inv.startswith("YN"):
                         base_inv = "VN" + base_inv[2:]
                         
-                    # Chuẩn hóa đuôi IN
                     invoice_clean = re.sub(r'(?i)(JN|I\}|\|IN|\[N)$', 'IN', invoice_raw).upper()
                     if invoice_clean.startswith("YN"):
                         invoice_clean = "VN" + invoice_clean[2:]
@@ -388,10 +385,8 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
                     else:
                         invoice = invoice_clean
                         
-                    # Lưu lại vị trí để cắt Description
                     inv_end_idx = block.find(vn_match.group(1)) + len(vn_match.group(1))
                     
-                    # Origin là tất cả text nằm trước cụm (Số + Đơn vị tính)
                     before_inv = rest_of_line[:vn_match.start()].strip()
                     origin_split = re.search(r'^(.*?)(?=\s*\d+[\s\n]*[A-Za-z]+$)', before_inv)
                     if origin_split:
@@ -399,7 +394,6 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
                     else:
                         origin = before_inv.upper()
             
-            # Gộp Origin bị rớt dòng (Ví dụ CTSH bị rớt xuống cùng dòng USD)
             if origin_extra: 
                 origin = (origin + " " + re.sub(r'[-–—~_]+', '', origin_extra)).strip().upper()
 
@@ -407,11 +401,10 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             desc = ""
             if inv_end_idx != -1 and usd_start_idx != -1 and usd_start_idx > inv_end_idx:
                 desc_raw = block[inv_end_idx:usd_start_idx]
-                desc_raw = re.sub(r'^[\s\n]+', '', desc_raw) # Cắt khoảng trắng/xuống dòng thừa ở đầu
-                desc_raw = re.sub(r'[-–—~_\s\n]+$', '', desc_raw) # Cắt bỏ rác và dấu trừ ở đuôi
+                desc_raw = re.sub(r'^[\s\n]+', '', desc_raw) 
+                desc_raw = re.sub(r'[-–—~_\s\n]+$', '', desc_raw) 
                 desc = clean_text(desc_raw)
             elif usd_start_idx != -1:
-                # Fallback nếu không tìm thấy Invoice Number
                 desc_fallback = block[:usd_start_idx].split('\n')[-1]
                 desc = re.sub(r'[-–—~_]+$', '', desc_fallback).strip()
 
@@ -422,9 +415,12 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             exp_match = re.search(r'(?i)EXPORTING\s+COUNTRY\s+HS\s+CODE\s+(\d{10})', block)
             exp_hs = exp_match.group(1)[:8] if exp_match else ""
             
-            # Khắc phục lỗi chữ "Onginal" hoặc "Orginal"
-            orig_match = re.search(r'(?i)CO\s+Reference\s+Number:\s*\n*([A-Za-z0-9/]+)', block)
-            orig_co = orig_match.group(1) if orig_match else ""
+            # Khắc phục lỗi chữ "Onginal", "Orginal" VÀ XÓA MỌI KHOẢNG TRẮNG BỊ OCR CẮT ĐỨT
+            orig_match = re.search(r'(?i)CO\s+Reference\s+Number:\s*\n*(.*?)(?=\n|Issuance|Page|$)', block)
+            orig_co = ""
+            if orig_match:
+                orig_co_raw = orig_match.group(1).strip()
+                orig_co = re.sub(r'\s+', '', orig_co_raw)
             
             iss_match = re.search(r'(?i)Issuance\s+Date:\s*\n*(\d{1,2}-[A-Za-z]{3}-\d{4})', block)
             orig_date = iss_match.group(1).upper() if iss_match else ""
