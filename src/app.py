@@ -5,6 +5,7 @@ import os
 import io
 import re
 import time
+import requests  
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -23,24 +24,46 @@ pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
 # 1. CẤU HÌNH CỘT DỮ LIỆU ĐẦU RA 
 # ==========================================
 COLUMNS = [
-    "Form", "Reference No", "Original CO Reference Number", "Item Number",
-    "English description", "Quantity", "UOM", "USD", "Origin criteria (see Overleaf Notes)",
-    "IMPORTING COUNTRY HS CODE", "EXPORTING COUNTRY HS CODE", "Invoice Number",
-    "Date of invoices", "CARTON", "Original CO Issuance Date", "Issuing Authority",
-    "Date of certification", "Products consigned from (Exporter's business name, address, country)",
-    "Products consigned to (Consignee's name, address, country)", "Means of transport and route (as far as known)",
-    "Produced in", "Exported to", "Marks and numbers on packages", "Box 13"
+    "Form",
+    "Reference No",
+    "Original CO Reference Number",
+    "Item Number",
+    "English description",
+    "Quantity",
+    "UOM",
+    "USD",
+    "Origin criteria (see Overleaf Notes)",
+    "IMPORTING COUNTRY HS CODE",
+    "EXPORTING COUNTRY HS CODE",
+    "Invoice Number",
+    "Date of invoices",
+    "CARTON",
+    "Original CO Issuance Date",
+    "Issuing Authority",
+    "Date of certification",
+    "Products consigned from (Exporter's business name, address, country)",
+    "Products consigned to (Consignee's name, address, country)",
+    "Means of transport and route (as far as known)",
+    "Produced in",
+    "Exported to",
+    "Marks and numbers on packages",
+    "Box 13"
 ]
 
 DECATHLON_BLUE = "#0082C3"
 DECATHLON_DARK = "#1F2937"
 BG_LIGHT = "#F9FAFB"
 
+# ==========================================
+# HÀM GỬI EMAIL THÔNG BÁO (SMTP)
+# ==========================================
 def send_email_notification():
     SENDER_EMAIL = "dobahuy7@gmail.com" 
     SENDER_PASSWORD = "kwyv yjud qvhy ehiq" 
     RECEIVER_EMAIL = "huy.doba@decathlon.com" 
+    
     if "nhap_gmail_ao" in SENDER_EMAIL: return
+
     try:
         msg = MIMEMultipart()
         msg['From'] = f"Hệ thống Form E/D <{SENDER_EMAIL}>"
@@ -56,6 +79,9 @@ def send_email_notification():
     except Exception as e:
         print(f"[!] Lỗi khi gửi email SMTP: {e}")
 
+# ==========================================
+# CÁC HÀM TIỆN ÍCH CHUNG
+# ==========================================
 def format_to_dd_mm_yyyy(date_str):
     if not date_str: return ""
     date_str = date_str.strip()
@@ -82,6 +108,9 @@ def clean_text(text):
     text = re.sub(r'^:\s*', '', text)
     return text.strip() if re.search(r'[A-Za-z0-9]', text) else ""
 
+# ==========================================
+# XỬ LÝ BOX 13 SCAN
+# ==========================================
 def extract_box13_scanned(page):
     try:
         bbox_13 = (0, page.height - 250, page.width, page.height)
@@ -113,6 +142,7 @@ def extract_box13_scanned(page):
         for y in sorted(rows.keys()):
             row_words = sorted(rows[y], key=lambda x: x['x0'])
             row_text = " ".join([w['text'] for w in row_words])
+
             if not in_box_13:
                 if re.search(r'(?i)(13\.?|Where\s*appropriate)', row_text): in_box_13 = True
                 else: continue
@@ -194,18 +224,23 @@ def extract_box13_scanned(page):
 def process_scanned_pdf(pdf, file_bytes, file_name):
     extracted_data = []
     
+    # 1. HARDCODE BOX 1 & BOX 2
     exporter = "DECATHLON LOGISTICS MALAYSIA SDN. BHD.\nPLOT D40 & D44\nJALAN DPB/8, ZONE B\nPELABUHAN TANJUNG PELEPAS\n81560 GELANG PATAH, JOHOR, MALAYSIA"
     consignee = "DECATHLON VIETNAM CO., LTD\nPAX SKY BUILDING, 5TH FLOOR\n26 UNG VAN KHIEM, WARD 25,\nBINH THANH DISTRICT\n700000 HO CHI MINH CITY VIETNAM"
+    
     reference_no = file_name.replace(".pdf", "")
     
+    # DÙNG FITZ ĐỂ MỞ PDF 
     with fitz.open(stream=file_bytes, filetype="pdf") as doc:
         page_first = doc[0]
+        
+        # ZOOM chuẩn 300 DPI cho OCR Tesseract
         zoom = 300 / 72
         mat = fitz.Matrix(zoom, zoom)
         tess_config = r'--oem 3 --psm 6'
 
         # ---------------------------------------------------------
-        # GLOBAL INFO
+        # LẤY THÔNG TIN GLOBAL TỪ TRANG ĐẦU (Tọa độ: Top)
         # ---------------------------------------------------------
         top_rect = fitz.Rect(0, 0, page_first.rect.width, 300)
         pix_top = page_first.get_pixmap(matrix=mat, clip=top_rect)
@@ -233,7 +268,7 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
                 exported_to = caps[-1] if caps else raw_exp.strip().upper()
 
         # ---------------------------------------------------------
-        # BOX 3
+        # TRÍCH XUẤT BOX 3 (XÓA TIÊU ĐỀ, TÌM NGÀY THÁNG)
         # ---------------------------------------------------------
         box3_rect = fitz.Rect(0, 160, 300, 315)
         pix3 = page_first.get_pixmap(matrix=mat, clip=box3_rect)
@@ -253,7 +288,7 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
         transport = re.sub(r'\s+', ' ', transport).strip()
 
         # ---------------------------------------------------------
-        # DATE OF CERTIFICATION
+        # TRÍCH XUẤT DATE OF CERTIFICATION
         # ---------------------------------------------------------
         cert_rect = fitz.Rect(0, 550, page_first.rect.width, page_first.rect.height)
         pix_cert = page_first.get_pixmap(matrix=mat, clip=cert_rect)
@@ -266,19 +301,27 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             date_cert = cert_match.group(1).strip()
 
         # ---------------------------------------------------------
-        # MAIN ITEMS
+        # TRÍCH XUẤT VÙNG HÀNG HÓA TỪ TẤT CẢ CÁC TRANG 
         # ---------------------------------------------------------
         main_text = ""
         for page in doc:
-            x1 = 0; y1 = 300; x2 = page.rect.width; y2 = page.rect.height - 180
+            x1 = 0
+            y1 = 300
+            x2 = page.rect.width
+            y2 = page.rect.height - 180
             if y2 <= y1: continue
+            
             main_rect = fitz.Rect(x1, y1, x2, y2)
             pix_main = page.get_pixmap(matrix=mat, clip=main_rect)
             img_main = Image.frombytes("RGB", [pix_main.width, pix_main.height], pix_main.samples) if not pix_main.alpha else Image.frombytes("RGBA", [pix_main.width, pix_main.height], pix_main.samples).convert("RGB")
             main_text += "\n" + pytesseract.image_to_string(img_main, config=tess_config)
             
+    # Box 13 xử lý bằng hàm phụ (cũ)
     box_13_str = extract_box13_scanned(pdf.pages[-1])
 
+    # ---------------------------------------------------------
+    # 5. CẮT BLOCK VÀ ÁP DỤNG LOGIC CHỐNG NHIỄU OCR (MỚI NHẤT)
+    # ---------------------------------------------------------
     matches = list(re.finditer(r'(?i)(?:N/M|N\s*/\s*M|N/W|M/N|N\.M)', main_text))
     
     if not matches:
@@ -298,12 +341,11 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             
             item_no = str(i + 1)
             
-            # --- LOGIC MỚI: SIẾT CHẶT MỎ NEO USD ---
-            # Giới hạn cụm ở giữa không quá 20 ký tự để không bị nuốt nhầm sang dòng Description
+            # --- LOGIC 1: BẮT MỎ NEO "USD" VÀ "DATE" ---
             qty, uom, usd, date_inv, origin_extra = "", "", "", "", ""
             usd_start_idx = -1
             
-            usd_pattern = r'(\d[\d\.,]*)\s+([A-Za-z]{2,})([^\n]{0,20}?)\s*USD\s+([\d\.,]+)\s+(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{4})'
+            usd_pattern = r'(\d[\d\.,]*)\s+([A-Za-z]{2,})(.*?)\s*USD\s+([\d\.,]+)\s+(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{4})'
             usd_match = re.search(usd_pattern, block, re.IGNORECASE)
             
             if usd_match:
@@ -312,22 +354,27 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
                 origin_extra = usd_match.group(3).strip()
                 usd = usd_match.group(4).strip()
                 date_inv = usd_match.group(5).strip()
-                usd_start_idx = usd_match.start()
+                usd_start_idx = usd_match.start() # Lấy vị trí để tìm Description
 
+            # --- LOGIC 2: BẮT MỎ NEO "CARTON" ĐỂ LẤY CARTON, ORIGIN VÀ INVOICE ---
             c_match = re.search(r'(\d+)[A-Za-z]*\s*CARTON', block, re.IGNORECASE)
             carton = c_match.group(1) if c_match else ""
             
             origin, invoice, invoice_raw = "", "", ""
             inv_end_idx = -1
             
-            carton_line_match = re.search(r'(?m)^.*?(?:N/M|N\s*/\s*M).*?\d+[A-Za-z]*\s*CARTON\s+(.*?)$', block, re.IGNORECASE)
-            if carton_line_match:
-                rest_of_line = carton_line_match.group(1).strip()
-                vn_match = re.search(r'([VY]N[A-Z0-9\-]+(?:[\s/\\\|\[\]\{\}\(\)]*(?:IN|JN|I\}?|N|\|N|\[N))?)', rest_of_line, re.IGNORECASE)
+            # Quét toàn bộ để lấy Invoice, dọn sạch hậu tố rác
+            inv_pattern = r'([VY]N[A-Z0-9\-]+(?:[\s/\\\|\[\]\{\}\(\)]*(?:IN|JN|I\}?|N|\|N))?)'
+            search_area = block[:usd_start_idx] if usd_start_idx != -1 else block
+            vn_match = re.search(inv_pattern, search_area, re.IGNORECASE)
+            
+            if vn_match:
+                invoice_raw = vn_match.group(1)
+                inv_end_idx = vn_match.end()
                 
-                if vn_match:
-                    invoice_raw = vn_match.group(1)
-                    base_inv = re.search(r'([VY]N[A-Z0-9\-]+)', invoice_raw, re.IGNORECASE).group(1).upper()
+                base_inv_match = re.search(r'([VY]N[A-Z0-9\-]+)', invoice_raw, re.IGNORECASE)
+                if base_inv_match:
+                    base_inv = base_inv_match.group(1).upper()
                     if base_inv.startswith("YN"): base_inv = "VN" + base_inv[2:]
                     
                     invoice_clean = re.sub(r'(?i)[\s/\\\|\[\]\{\}\(\)]+(IN|JN|I\}?|N|\|N|\[N)$', ' IN', invoice_raw).upper()
@@ -338,36 +385,56 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
                     else:
                         invoice = invoice_clean
                         if form_type == "AI" and "IN" not in invoice: invoice += " IN"
-                        
-                    inv_end_idx = block.find(vn_match.group(1)) + len(vn_match.group(1))
-                    
-                    before_inv = rest_of_line[:vn_match.start()].strip()
-                    origin_split = re.search(r'^(.*?)(?=\s*\d+[\s\n]*[A-Za-z]+$)', before_inv)
-                    if origin_split: origin = origin_split.group(1).strip().upper()
-                    else: origin = before_inv.upper()
             
+            # Lấy Origin dựa vào mốc CARTON và Invoice/Qty
+            carton_line_match = re.search(r'(?m)^.*?(?:N/M|N\s*/\s*M).*?\d+[A-Za-z]*\s*CARTON\s+(.*?)$', block, re.IGNORECASE)
+            if carton_line_match and qty and uom:
+                rest_of_line = carton_line_match.group(1).strip()
+                split_match = re.search(r'^(.*?)\b' + re.escape(qty) + r'\s+' + re.escape(uom) + r'\b', rest_of_line, re.IGNORECASE)
+                if split_match:
+                    origin = split_match.group(1).strip().upper()
+                else:
+                    if vn_match and vn_match.start() < len(rest_of_line):
+                        origin = rest_of_line[:vn_match.start()].strip().upper()
+                    else:
+                        origin = rest_of_line.upper()
+                        
             if origin_extra: 
                 origin = (origin + " " + re.sub(r'[-–—~_]+', '', origin_extra)).strip().upper()
 
-            # --- LOGIC MỚI: BỘ LỌC LÀM SẠCH KÝ TỰ RÁC ---
+            # --- LOGIC 3: LẤY MÔ TẢ (DESCRIPTION) CHỐNG NHIỄU MẤT CHỮ ---
             desc = ""
-            if usd_start_idx != -1:
-                if inv_end_idx != -1 and usd_start_idx > inv_end_idx:
-                    desc_raw = block[inv_end_idx:usd_start_idx]
+            
+            # Nếu tìm thấy Invoice, ta lấy mọi thứ nằm giữa Invoice và Quantity(hoặc USD)
+            if inv_end_idx != -1:
+                # Cố gắng tìm vị trí của Quantity và UOM làm điểm chặn cuối
+                qty_idx_match = re.search(r'\b' + re.escape(qty) + r'\s+' + re.escape(uom) + r'\b', block[inv_end_idx:], re.IGNORECASE)
+                if qty_idx_match:
+                    # Nếu tìm thấy cụm (Số lượng + PCE) thì cắt đến trước nó
+                    desc_raw = block[inv_end_idx : inv_end_idx + qty_idx_match.start()]
+                elif usd_start_idx != -1:
+                    # Nếu không thấy cụm (Số + PCE) thì cắt đến trước chữ USD
+                    desc_raw = block[inv_end_idx : usd_start_idx]
                 else:
-                    qu_match = re.search(r'CARTON.*?\b' + re.escape(qty) + r'\s+' + re.escape(uom) + r'\b', block[:usd_start_idx], re.IGNORECASE | re.DOTALL)
-                    if qu_match:
-                        desc_raw = block[qu_match.end():usd_start_idx]
-                    else:
-                        desc_raw = block[:usd_start_idx].split('\n')[-1]
-                
-                # Máy hút bụi chữ rác: loại bỏ khoảng trắng, các ký hiệu lạ ở đầu, và chữ rác f, l, |...
-                desc_raw = re.sub(r'^[\s\n]+', '', desc_raw) 
+                    # Rớt vào đây tức là cả file bị hỏng format nặng, bốc tạm phần cuối
+                    desc_raw = block[inv_end_idx:].split('\n')[0]
+            else:
+                # Không thấy Invoice, lấy bừa theo dòng chứa Quantity
+                qu_match = re.search(r'CARTON.*?\b' + re.escape(qty) + r'\s+' + re.escape(uom) + r'\b', block, re.IGNORECASE | re.DOTALL)
+                if qu_match and usd_start_idx != -1:
+                    desc_raw = block[qu_match.end() : usd_start_idx]
+                else:
+                    desc_raw = ""
+
+            # Quét dọn rác OCR cho Description
+            if desc_raw:
+                desc_raw = re.sub(r'^[\s\n]+', '', desc_raw) # Dọn rác đầu dòng
                 desc_raw = re.sub(r'^[^a-zA-Z0-9]+', '', desc_raw) # Cắt các dấu | [ { rác
                 desc_raw = re.sub(r'^(?:[fFjJlLiI\|])\s+', '', desc_raw) # Cắt chữ cái rác đứng 1 mình (VD: 'f ', '| ')
-                desc_raw = re.sub(r'[-–—~_\s\n]+$', '', desc_raw) # Cắt gạch ngang ở đuôi
+                desc_raw = re.sub(r'[-–—~_\s\n]+$', '', desc_raw) # Cắt gạch ngang/xuống dòng ở đuôi
                 desc = clean_text(desc_raw)
 
+            # --- LOGIC 4: CẬP NHẬT TÌM HS CODES & ORIGINAL CO ---
             imp_match = re.search(r'(?i)IMPORTING\s+COUNTRY\s+HS\s+CODE\s+(\d{10})', block)
             imp_hs = imp_match.group(1)[:8] if imp_match else ""
             
@@ -383,6 +450,7 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             iss_match = re.search(r'(?i)Issuance\s+Date:\s*\n*(\d{1,2}-[A-Za-z]{3}-\d{4})', block)
             orig_date = iss_match.group(1).upper() if iss_match else ""
             
+            # LƯU KẾT QUẢ VÀO DỮ LIỆU
             extracted_data.append({
                 COLUMNS[0]: form_type, COLUMNS[1]: reference_no, COLUMNS[2]: clean_text(orig_co),
                 COLUMNS[3]: item_no, COLUMNS[4]: desc, COLUMNS[5]: clean_text(qty),
@@ -394,9 +462,13 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
                 COLUMNS[21]: exported_to, COLUMNS[22]: "N/M", COLUMNS[23]: box_13_str
             })
             
+    # ==========================================
+    # ĐOẠN CODE IN LOG KIỂM TRA
+    # ==========================================
     print(f"\n" + "="*70)
     print(f"📊 KẾT QUẢ TRÍCH XUẤT (PyMuPDF + Tesseract) FILE: {file_name}")
     print("="*70)
+    
     if not extracted_data:
         print("[!] Không có dữ liệu nào được trích xuất.")
     else:
@@ -409,6 +481,7 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
                     if len(display_value) > 100: display_value = display_value[:97] + "..."
                     print(f"   + {key}: {display_value}")
     print("="*70 + "\n")
+
     return {"error": None, "data": extracted_data, "file_name": file_name}
 
 # ==========================================
