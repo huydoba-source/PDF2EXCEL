@@ -303,9 +303,6 @@ def process_scanned_pdf(pdf, file_name):
     exporter = "DECATHLON LOGISTICS MALAYSIA SDN. BHD.\nPLOT D40 & D44\nJALAN DPB/8, ZONE B\nPELABUHAN TANJUNG PELEPAS\n81560 GELANG PATAH, JOHOR, MALAYSIA"
     consignee = "DECATHLON VIETNAM CO., LTD\nPAX SKY BUILDING, 5TH FLOOR\n26 UNG VAN KHIEM, WARD 25,\nBINH THANH DISTRICT\n700000 HO CHI MINH CITY VIETNAM"
     
-    # ==========================================
-    # 2. TRÍCH XUẤT BOX 3 (TÌM MỐC NGÀY THÁNG ĐẦU TIÊN)
-    # ==========================================
 # ==========================================
     # 2. TRÍCH XUẤT BOX 3 (TÌM MỐC NGÀY THÁNG & XÓA TIÊU ĐỀ)
     # ==========================================
@@ -318,8 +315,9 @@ def process_scanned_pdf(pdf, file_name):
     # 2. Xóa TOÀN BỘ các danh mục/tiêu đề của Box 3 bất kể trường hợp nào
     b3_clean = re.sub(r'(?i)3\.?\s*Means of transport.*?\)', '', b3_clean)
     b3_clean = re.sub(r'(?i)Departure Date\s*[:;]?', '', b3_clean)
-    b3_clean = re.sub(r'(?i)Vessel[\'’]?s?\s*Name/?Aircraft[^:]*[:;]?', '', b3_clean)
-    b3_clean = re.sub(r'(?i)Port of Discharge\s*[:;]?', '', b3_clean)
+    # [CẬP NHẬT LOGIC]: Quét mạnh tay hơn để xóa sạch Vessel và Port
+    b3_clean = re.sub(r'(?i)Vessel[\'’]?s?\s*Name[/\\]?Aircraft.*?etc\.?[:;]?', '', b3_clean)
+    b3_clean = re.sub(r'(?i)Port\s+of\s+Discharge\s*[:;]?', '', b3_clean)
     
     # 3. Lấy dữ liệu bắt đầu bằng ngày tháng (DD MM YYYY)
     transport = ""
@@ -332,6 +330,9 @@ def process_scanned_pdf(pdf, file_name):
         
     # Xoá bớt khoảng trắng dư thừa (nếu có) do việc xóa tiêu đề để lại
     transport = re.sub(r'\s+', ' ', transport).strip()
+    
+    # [FIX LỖI CRITICAL]: Trả lại biến reference_no bị xóa nhầm
+    reference_no = file_name.replace(".pdf", "")
     
     # ==========================================
     # 3. LẤY TEXT TỪ DOCLING VÀ LÀM PHẲNG
