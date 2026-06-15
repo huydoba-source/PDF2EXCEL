@@ -6,15 +6,16 @@ import io
 import re
 import time
 import requests  
-import pdfplumber
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 # --- THƯ VIỆN BỔ SUNG CHO OCR ---
+import pdfplumber
+import fitz  # PyMuPDF
 import pytesseract
 from pytesseract import Output
-from PIL import Image
+from PIL import Image, ImageDraw, ImageOps
 
 # [LƯU Ý]: Nếu chạy trên máy tính Windows thì đổi thành r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
@@ -108,13 +109,14 @@ def clean_text(text):
     return text.strip() if re.search(r'[A-Za-z0-9]', text) else ""
 
 # ==========================================
-# XỬ LÝ ĐẶC BIỆT CHO BOX 13 SCAN
+# XỬ LÝ BOX 13 SCAN
 # ==========================================
 def extract_box13_scanned(page):
     try:
         bbox_13 = (0, page.height - 250, page.width, page.height)
         crop = page.crop(bbox_13)
         img = crop.to_image(resolution=300).original
+        
         ocr_data = pytesseract.image_to_data(img, output_type=Output.DICT, config='--oem 3 --psm 11')
         words = []
         for i in range(len(ocr_data['text'])):
@@ -140,6 +142,7 @@ def extract_box13_scanned(page):
         for y in sorted(rows.keys()):
             row_words = sorted(rows[y], key=lambda x: x['x0'])
             row_text = " ".join([w['text'] for w in row_words])
+
             if not in_box_13:
                 if re.search(r'(?i)(13\.?|Where\s*appropriate)', row_text): in_box_13 = True
                 else: continue
@@ -163,6 +166,7 @@ def extract_box13_scanned(page):
                     x_box_start = max(0, x_box_end - box_size)
                     y_box_start = max(0, start_word['top'] - int((box_size - h_word) / 2))
                     y_box_end = y_box_start + box_size
+
                     cb_img = img.crop((x_box_start, y_box_start, x_box_end, y_box_end))
                     gray_box = cb_img.convert("L")
                     pixels = list(gray_box.get_flattened_data()) if hasattr(gray_box, 'get_flattened_data') else list(gray_box.getdata())
@@ -199,6 +203,7 @@ def extract_box13_scanned(page):
                     h_word = start_word['h']
                     y_box_start = max(0, start_word['top'] - int((box_size - h_word) / 2))
                     y_box_end = y_box_start + box_size
+
                     cb_img = img.crop((x_box_start, y_box_start, x_box_end, y_box_end))
                     gray_box = cb_img.convert("L")
                     pixels = list(gray_box.get_flattened_data()) if hasattr(gray_box, 'get_flattened_data') else list(gray_box.getdata())
@@ -207,15 +212,14 @@ def extract_box13_scanned(page):
                         results["Back-to-Back CO"] = "YES"
                     back_done = True 
 
-        if results["Third Country Invoicing"] == "YES" or results["Back-to-Back CO"] == "YES":
-            return "YES"
+        if results["Third Country Invoicing"] == "YES" or results["Back-to-Back CO"] == "YES": return "YES"
         return "No"
     except Exception as e:
         print(f"Lỗi đọc Box 13 Scan: {e}")
         return "No"
 
 # ==========================================
-# 2. XỬ LÝ FILE SCAN BẰNG pdfplumber (PyMuPDF) + TESSERACT THEO TỌA ĐỘ
+# 2. XỬ LÝ FILE SCAN BẰNG FITZ (PyMuPDF) + TESSERACT THEO TỌA ĐỘ
 # ==========================================
 def process_scanned_pdf(pdf, file_bytes, file_name):
     extracted_data = []
@@ -226,19 +230,19 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
     
     reference_no = file_name.replace(".pdf", "")
     
-    # Mở PDF bằng PyMuPDF để crop theo tọa độ chuẩn xác
-    with pdfplumber.open(stream=file_bytes, filetype="pdf") as doc:
+    # DÙNG FITZ ĐỂ MỞ PDF THEO ĐÚNG LOGIC CỦA BẠN TRÁNH LỖI STREAM
+    with fitz.open(stream=file_bytes, filetype="pdf") as doc:
         page_first = doc[0]
         
         # ZOOM chuẩn 300 DPI cho OCR Tesseract
         zoom = 300 / 72
-        mat = pdfplumber.Matrix(zoom, zoom)
+        mat = fitz.Matrix(zoom, zoom)
         tess_config = r'--oem 3 --psm 6'
 
         # ---------------------------------------------------------
         # LẤY THÔNG TIN GLOBAL TỪ TRANG ĐẦU (Tọa độ: Top)
         # ---------------------------------------------------------
-        top_rect = pdfplumber.Rect(0, 0, page_first.rect.width, 300)
+        top_rect = fitz.Rect(0, 0, page_first.rect.width, 300)
         pix_top = page_first.get_pixmap(matrix=mat, clip=top_rect)
         img_top = Image.frombytes("RGB", [pix_top.width, pix_top.height], pix_top.samples) if not pix_top.alpha else Image.frombytes("RGBA", [pix_top.width, pix_top.height], pix_top.samples).convert("RGB")
         top_text = pytesseract.image_to_string(img_top, config=tess_config).strip()
@@ -266,7 +270,7 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
         # ---------------------------------------------------------
         # TRÍCH XUẤT BOX 3 (XÓA TIÊU ĐỀ, TÌM NGÀY THÁNG)
         # ---------------------------------------------------------
-        box3_rect = pdfplumber.Rect(0, 160, 300, 315)
+        box3_rect = fitz.Rect(0, 160, 300, 315)
         pix3 = page_first.get_pixmap(matrix=mat, clip=box3_rect)
         img3 = Image.frombytes("RGB", [pix3.width, pix3.height], pix3.samples) if not pix3.alpha else Image.frombytes("RGBA", [pix3.width, pix3.height], pix3.samples).convert("RGB")
         
@@ -284,9 +288,9 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
         transport = re.sub(r'\s+', ' ', transport).strip()
 
         # ---------------------------------------------------------
-        # TRÍCH XUẤT DATE OF CERTIFICATION (THEO TỌA ĐỘ BẠN CẤP)
+        # TRÍCH XUẤT DATE OF CERTIFICATION
         # ---------------------------------------------------------
-        cert_rect = pdfplumber.Rect(0, 550, page_first.rect.width, page_first.rect.height)
+        cert_rect = fitz.Rect(0, 550, page_first.rect.width, page_first.rect.height)
         pix_cert = page_first.get_pixmap(matrix=mat, clip=cert_rect)
         img_cert = Image.frombytes("RGB", [pix_cert.width, pix_cert.height], pix_cert.samples) if not pix_cert.alpha else Image.frombytes("RGBA", [pix_cert.width, pix_cert.height], pix_cert.samples).convert("RGB")
         cert_text = pytesseract.image_to_string(img_cert, config=tess_config).strip()
@@ -309,13 +313,13 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             
             if y2 <= y1: continue
             
-            main_rect = pdfplumber.Rect(x1, y1, x2, y2)
+            main_rect = fitz.Rect(x1, y1, x2, y2)
             pix_main = page.get_pixmap(matrix=mat, clip=main_rect)
             img_main = Image.frombytes("RGB", [pix_main.width, pix_main.height], pix_main.samples) if not pix_main.alpha else Image.frombytes("RGBA", [pix_main.width, pix_main.height], pix_main.samples).convert("RGB")
             
             main_text += "\n" + pytesseract.image_to_string(img_main, config=tess_config)
             
-    # Box 13 xử lý bằng hàm cũ
+    # Box 13 xử lý bằng PDFPlumber ở trang cuối
     box_13_str = extract_box13_scanned(pdf.pages[-1])
 
     # ---------------------------------------------------------
@@ -347,7 +351,7 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
                 desc = dash_line_match.group(1).strip()         # Nằm trước dấu '-'
                 qty = dash_line_match.group(2).strip()          # Số sau dấu '-'
                 uom = dash_line_match.group(3).strip().upper()  # Ngay sau Quantity
-                origin_extra = dash_line_match.group(4).strip() # VD: CTSH (bị rớt đuôi)
+                origin_extra = dash_line_match.group(4).strip() # Cụm dư bị tách dòng (như CTSH)
                 usd = dash_line_match.group(5).strip()          # Số sau USD
                 date_inv = dash_line_match.group(6).strip()     # DD/MM/YYYY
 
@@ -366,7 +370,8 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
                     origin = split_match.group(1).strip().upper()
                     invoice_raw = split_match.group(2).strip().upper()
                     
-                    # Logic Invoice Number (thêm IN nếu cần)
+                    # Logic Invoice Number (xóa dư thừa UOM nếu có & thêm IN nếu cần)
+                    invoice_raw = re.sub(r'^' + re.escape(uom) + r'\s+', '', invoice_raw, flags=re.IGNORECASE).strip()
                     vn_match = re.search(r'(VN[A-Z0-9\-]+)', invoice_raw)
                     if vn_match:
                         base_inv = vn_match.group(1)
@@ -381,7 +386,7 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             # Gộp Origin bị rớt đuôi (như CTSH)
             if origin_extra: origin = (origin + " " + origin_extra).strip()
             
-            # --- LOGIC HS CODES (10 SỐ -> LẤY 8) ---
+            # --- LOGIC HS CODES (TÌM 10 SỐ -> LẤY 8) ---
             imp_match = re.search(r'(?i)IMPORTING\s+COUNTRY\s+HS\s+CODE\s+(\d{10})', block)
             imp_hs = imp_match.group(1)[:8] if imp_match else ""
             
@@ -621,7 +626,7 @@ def process_single_pdf(file_data):
             if not first_page_text or len(first_page_text.strip()) < 50:
                 if "scanned_files_detected" in st.session_state:
                     st.session_state.scanned_files_detected.append(file_name)
-                # Đã update chữ ký hàm để xử lý file bytes cho PyMuPDF
+                # Dùng Tesseract và tọa độ trực tiếp cho file scan
                 return process_scanned_pdf(pdf, file_bytes, file_name)
 
             # LUỒNG CHO FILE CÓ TEXT LAYER
