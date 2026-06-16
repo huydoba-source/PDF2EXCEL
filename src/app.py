@@ -195,9 +195,6 @@ def extract_box13_scanned(page):
 # ==========================================
 # 2. XỬ LÝ FILE SCAN BẰNG FITZ (PyMuPDF) + TESSERACT THEO TỌA ĐỘ
 # ==========================================
-# ==========================================
-# 2. XỬ LÝ FILE SCAN BẰNG FITZ (PyMuPDF) + TESSERACT THEO TỌA ĐỘ
-# ==========================================
 def process_scanned_pdf(pdf, file_bytes, file_name):
     extracted_data = []
     
@@ -283,7 +280,7 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             pix_main = page.get_pixmap(matrix=mat, clip=main_rect)
             img_main = Image.frombytes("RGB", [pix_main.width, pix_main.height], pix_main.samples) if not pix_main.alpha else Image.frombytes("RGBA", [pix_main.width, pix_main.height], pix_main.samples).convert("RGB")
             main_text += "\n" + pytesseract.image_to_string(img_main, config=tess_config)
-            
+    logging.info(main_text)       
     box_13_str = extract_box13_scanned(pdf.pages[-1])
 
     matches = list(re.finditer(r'(?i)(?:N/M|N\s*/\s*M|N/W|M/N|N\.M)', main_text))
@@ -305,67 +302,100 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             
             item_no = str(i + 1)
             
-            # --- LOGIC MỚI: QUÉT DÒNG CÓ CHỮ "USD" HOẶC CHỨA DẤU "-" LÀM CHUẨN ---
-            qty, uom, usd, date_inv = "", "", "", ""
+            # --- LOGIC MỚI: BẮT MỎ NEO SỐ LƯỢNG, UOM, DATE TỪ DÒNG DƯỚI CÙNG CHỐNG LỖI MẤT CHỮ USD ---
+            qty, uom, usd, date_inv, origin_extra = "", "", "", "", ""
+            qty_start_idx = -1
             
-            usd_pattern = r'(\d[\d\.,]*)\s+([A-Za-z]{2,})(?:[^\n]*?)\s*USD\s+([\d\.,]+)\s+(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{4})'
-            usd_match = re.search(usd_pattern, block, re.IGNORECASE)
+            # Bắt cụm [Số lượng] [Đơn vị] [Rác/USD] [Ngày Tháng]
+            qd_match = re.search(r'(\d[\d\.,]*)\s+([A-Za-z]{2,})([^\n]{0,30}?)\s+(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{4})', block, re.IGNORECASE)
             
-            if usd_match:
-                qty = usd_match.group(1).strip()
-                uom = usd_match.group(2).strip().upper()
-                usd = usd_match.group(4).strip()
-                date_inv = usd_match.group(5).strip()
+            if qd_match:
+                qty = qd_match.group(1).strip()
+                uom = qd_match.group(2).strip().upper()
+                middle_junk = qd_match.group(3).strip()
+                date_inv = qd_match.group(4).strip()
+                qty_start_idx = qd_match.start()
+                
+                # Cố gắng cứu vớt USD từ đống rác ở giữa (nếu OCR đọc được số)
+                val_match = re.search(r'([\d\.,]+)$', middle_junk)
+                if val_match:
+                    usd = val_match.group(1).strip()
+                    origin_extra = middle_junk[:val_match.start()].strip()
+                else:
+                    origin_extra = middle_junk
+                    
+                # Xóa sạch chữ USD/EUR bị dính vào Origin
+                origin_extra = re.sub(r'(?i)\b(USD|EUR|MYR|VND)\b', '', origin_extra).strip()
+                origin_extra = re.sub(r'^[-–—~_\s]+', '', origin_extra).strip()
 
-            # --- LOGIC MỚI: QUÉT CARTON VÀ ORIGIN ---
+            # --- LOGIC 2: BẮT MỎ NEO "CARTON" ĐỂ LẤY CARTON, ORIGIN VÀ INVOICE ---
             c_match = re.search(r'(\d+)[A-Za-z]*\s*CARTON', block, re.IGNORECASE)
             carton = c_match.group(1) if c_match else ""
             
             origin, invoice = "", ""
-            # Tìm cụm Origin nằm ngay sau CARTON và trước số lượng
-            origin_match = re.search(r'CARTON\s+([A-Za-z\s\+%\.]+?)\s+\d+', block, re.IGNORECASE)
-            if origin_match:
-                origin = origin_match.group(1).strip().upper()
+            inv_end_idx = -1
             
-            # Quét tìm Invoice: Ưu tiên tìm mã VN/YN 
-            inv_pattern = r'([VY]N[A-Z0-9\-]+(?:[\s/\\\|\[\]\{\}\(\)]*(?:IN|JN|I\}?|I\?|N|\|N|\[N|1N))?)'
-            vn_match = re.search(inv_pattern, block, re.IGNORECASE)
-            
-            if vn_match:
-                invoice_raw = vn_match.group(1)
-                base_inv_match = re.search(r'([VY]N[A-Z0-9\-]+)', invoice_raw, re.IGNORECASE)
-                if base_inv_match:
-                    base_inv = base_inv_match.group(1).upper()
+            carton_line_match = re.search(r'(?m)^.*?(?:N/M|N\s*/\s*M).*?\d+[A-Za-z]*\s*CARTON\s+(.*?)$', block, re.IGNORECASE)
+            if carton_line_match:
+                rest_of_line = carton_line_match.group(1).strip()
+                
+                vn_match = re.search(r'([VY]N[A-Z0-9\-]+)', rest_of_line, re.IGNORECASE)
+                if vn_match:
+                    base_inv = vn_match.group(1).upper()
                     if base_inv.startswith("YN"): base_inv = "VN" + base_inv[2:]
                     
-                    invoice_clean = re.sub(r'(?i)[\s/\\\|\[\]\{\}\(\)\?]+(IN|JN|I\}?|I\?|N|\|N|\[N|1N)$', ' IN', invoice_raw).upper()
-                    if invoice_clean.startswith("YN"): invoice_clean = "VN" + invoice_clean[2:]
+                    if form_type == "AI": invoice = base_inv + " IN"
+                    else: invoice = base_inv
                     
-                    if form_type == "AI" and not invoice_clean.endswith("IN"):
-                        invoice = base_inv + " IN"
+                    # Quét qua rác OCR để đẩy inv_end_idx qua khỏi cụm rác
+                    inv_end_idx_relative = vn_match.end()
+                    suffix_match = re.match(r'[\s/\\\|\[\]\{\}\(\)\?]*(?:IN|JN|I\}?|I\?|N|\|N|\[N|1N)', rest_of_line[inv_end_idx_relative:], re.IGNORECASE)
+                    if suffix_match:
+                        inv_end_idx_relative += suffix_match.end()
+                    
+                    # Cập nhật vị trí tuyệt đối của Invoice để cắt Description
+                    carton_line_start = block.find(rest_of_line)
+                    if carton_line_start != -1:
+                        inv_end_idx = carton_line_start + inv_end_idx_relative
+                    
+                    # Lấy phần đầu (Origin) và chặt đôi dựa vào số Quantity
+                    before_inv = rest_of_line[:vn_match.start()].strip()
+                    if qty:
+                        qty_split = re.search(r'\b' + re.escape(qty) + r'\b', before_inv)
+                        if qty_split:
+                            origin = before_inv[:qty_split.start()].strip().upper()
+                        else:
+                            orig_split = re.search(r'^(.*?)(?=\s*\d+)', before_inv)
+                            origin = orig_split.group(1).strip().upper() if orig_split else before_inv.upper()
                     else:
-                        invoice = invoice_clean
-                        if form_type == "AI" and "IN" not in invoice: invoice += " IN"
+                        orig_split = re.search(r'^(.*?)(?=\s*\d+)', before_inv)
+                        origin = orig_split.group(1).strip().upper() if orig_split else before_inv.upper()
+                        
+            if origin_extra: 
+                origin = (origin + " " + re.sub(r'[-–—~_]+', '', origin_extra)).strip().upper()
 
-            # --- LOGIC MỚI: LẤY DESCRIPTION BÁM CHẶT VÀO DẤU "-" ---
+            # --- LOGIC 3: LẤY MÔ TẢ (DESCRIPTION) CHỐNG MẤT CHỮ ---
             desc = ""
-            # Tìm dòng văn bản chứa dấu gạch ngang (thường là dòng chứa Description - Qty UOM USD)
-            desc_line_match = re.search(r'(?m)^([^\n]+?)\s*[-–—]\s*\d+[\s\n]+[A-Za-z]+.*?(?:USD|EUR|VND)', block, re.IGNORECASE)
-            
-            if desc_line_match:
-                desc_raw = desc_line_match.group(1).strip()
-                # Xóa sạch invoice nếu bị dính vào dòng description
-                if vn_match:
-                    desc_raw = desc_raw.replace(vn_match.group(1), "")
+            if qty_start_idx != -1:
+                # Cắt chuỗi nằm gọn giữa Invoice và chữ Số lượng (Quantity) của dòng dưới
+                if inv_end_idx != -1 and qty_start_idx > inv_end_idx:
+                    desc_raw = block[inv_end_idx:qty_start_idx]
+                else:
+                    # Ràng buộc chống mất chữ nếu Description rớt xuống nhiều dòng và mất Invoice
+                    qu_match = re.search(r'CARTON.*?\n', block[:qty_start_idx], re.IGNORECASE)
+                    if qu_match:
+                        desc_raw = block[qu_match.end():qty_start_idx]
+                    else:
+                        desc_raw = block[:qty_start_idx].split('\n')[-1]
                 
-                # Dọn dẹp ký tự rác đầu dòng
+                # Máy hút bụi chữ rác: loại bỏ khoảng trắng, các ký hiệu lạ ở đầu, và chữ rác f, l, |...
                 desc_raw = re.sub(r'^[\s\n]+', '', desc_raw) 
                 desc_raw = re.sub(r'^[^a-zA-Z0-9]+', '', desc_raw) 
                 desc_raw = re.sub(r'^(?:[fFjJlLiI\|])\s+', '', desc_raw) 
                 desc_raw = re.sub(r'[-–—~_\s\n]+$', '', desc_raw) 
                 desc = clean_text(desc_raw)
 
-            # --- LOGIC 4: TÌM HS CODES & ORIGINAL CO ---
+            # --- LOGIC 4: CẬP NHẬT TÌM HS CODES & ORIGINAL CO ---
             imp_match = re.search(r'(?i)IMPORTING\s+COUNTRY\s+HS\s+CODE\s+(\d{10})', block)
             imp_hs = imp_match.group(1)[:8] if imp_match else ""
             
