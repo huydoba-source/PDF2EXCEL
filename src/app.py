@@ -307,7 +307,7 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             qty_start_idx = -1
             
             # Bắt cụm [Số lượng] [Đơn vị] [Rác/USD] [Ngày Tháng]
-            qd_match = re.search(r'(\d[\d\.,]*)\s+([A-Za-z]{2,})([^\n]{0,30}?)\s+(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{4})', block, re.IGNORECASE)
+            qd_match = re.search(r'(?:^|\s)(\d[\d\.,]*)\s+([A-Za-z]{2,})([^\n]{0,30}?)\s+(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{4})', block, re.IGNORECASE)
             
             if qd_match:
                 qty = qd_match.group(1).strip()
