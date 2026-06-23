@@ -280,7 +280,7 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             pix_main = page.get_pixmap(matrix=mat, clip=main_rect)
             img_main = Image.frombytes("RGB", [pix_main.width, pix_main.height], pix_main.samples) if not pix_main.alpha else Image.frombytes("RGBA", [pix_main.width, pix_main.height], pix_main.samples).convert("RGB")
             main_text += "\n" + pytesseract.image_to_string(img_main, config=tess_config)
-    logging.info(main_text)       
+            
     box_13_str = extract_box13_scanned(pdf.pages[-1])
 
     matches = list(re.finditer(r'(?i)(?:N/M|N\s*/\s*M|N/W|M/N|N\.M)', main_text))
@@ -302,21 +302,19 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             
             item_no = str(i + 1)
             
-            # --- LOGIC MỚI: BẮT MỎ NEO SỐ LƯỢNG, UOM, DATE TỪ DÒNG DƯỚI CÙNG CHỐNG LỖI MẤT CHỮ USD ---
             qty, uom, usd, date_inv, origin_extra = "", "", "", "", ""
-            qty_start_idx = -1
+            usd_start_idx = -1
             
-            # Bắt cụm [Số lượng] [Đơn vị] [Rác/USD] [Ngày Tháng]
-            qd_match = re.search(r'(?:^|\s)(\d[\d\.,]*)\s+([A-Za-z]{2,})([^\n]{0,30}?)\s+(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{4})', block, re.IGNORECASE)
+            usd_pattern = r'(\d[\d\.,]*)\s+([A-Za-z]{2,})([^\n]{0,30}?)\s+(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{4})'
+            qd_match = re.search(usd_pattern, block, re.IGNORECASE)
             
             if qd_match:
                 qty = qd_match.group(1).strip()
                 uom = qd_match.group(2).strip().upper()
                 middle_junk = qd_match.group(3).strip()
                 date_inv = qd_match.group(4).strip()
-                qty_start_idx = qd_match.start()
+                usd_start_idx = qd_match.start()
                 
-                # Cố gắng cứu vớt USD từ đống rác ở giữa (nếu OCR đọc được số)
                 val_match = re.search(r'([\d\.,]+)$', middle_junk)
                 if val_match:
                     usd = val_match.group(1).strip()
@@ -324,11 +322,9 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
                 else:
                     origin_extra = middle_junk
                     
-                # Xóa sạch chữ USD/EUR bị dính vào Origin
                 origin_extra = re.sub(r'(?i)\b(USD|EUR|MYR|VND)\b', '', origin_extra).strip()
                 origin_extra = re.sub(r'^[-–—~_\s]+', '', origin_extra).strip()
 
-            # --- LOGIC 2: BẮT MỎ NEO "CARTON" ĐỂ LẤY CARTON, ORIGIN VÀ INVOICE ---
             c_match = re.search(r'(\d+)[A-Za-z]*\s*CARTON', block, re.IGNORECASE)
             carton = c_match.group(1) if c_match else ""
             
@@ -347,18 +343,15 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
                     if form_type == "AI": invoice = base_inv + " IN"
                     else: invoice = base_inv
                     
-                    # Quét qua rác OCR để đẩy inv_end_idx qua khỏi cụm rác
                     inv_end_idx_relative = vn_match.end()
                     suffix_match = re.match(r'[\s/\\\|\[\]\{\}\(\)\?]*(?:IN|JN|I\}?|I\?|N|\|N|\[N|1N)', rest_of_line[inv_end_idx_relative:], re.IGNORECASE)
                     if suffix_match:
                         inv_end_idx_relative += suffix_match.end()
                     
-                    # Cập nhật vị trí tuyệt đối của Invoice để cắt Description
                     carton_line_start = block.find(rest_of_line)
                     if carton_line_start != -1:
                         inv_end_idx = carton_line_start + inv_end_idx_relative
                     
-                    # Lấy phần đầu (Origin) và chặt đôi dựa vào số Quantity
                     before_inv = rest_of_line[:vn_match.start()].strip()
                     if qty:
                         qty_split = re.search(r'\b' + re.escape(qty) + r'\b', before_inv)
@@ -374,28 +367,23 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             if origin_extra: 
                 origin = (origin + " " + re.sub(r'[-–—~_]+', '', origin_extra)).strip().upper()
 
-            # --- LOGIC 3: LẤY MÔ TẢ (DESCRIPTION) CHỐNG MẤT CHỮ ---
             desc = ""
-            if qty_start_idx != -1:
-                # Cắt chuỗi nằm gọn giữa Invoice và chữ Số lượng (Quantity) của dòng dưới
-                if inv_end_idx != -1 and qty_start_idx > inv_end_idx:
-                    desc_raw = block[inv_end_idx:qty_start_idx]
+            if usd_start_idx != -1:
+                if inv_end_idx != -1 and usd_start_idx > inv_end_idx:
+                    desc_raw = block[inv_end_idx:usd_start_idx]
                 else:
-                    # Ràng buộc chống mất chữ nếu Description rớt xuống nhiều dòng và mất Invoice
-                    qu_match = re.search(r'CARTON.*?\n', block[:qty_start_idx], re.IGNORECASE)
+                    qu_match = re.search(r'CARTON.*?\n', block[:usd_start_idx], re.IGNORECASE)
                     if qu_match:
-                        desc_raw = block[qu_match.end():qty_start_idx]
+                        desc_raw = block[qu_match.end():usd_start_idx]
                     else:
-                        desc_raw = block[:qty_start_idx].split('\n')[-1]
+                        desc_raw = block[:usd_start_idx].split('\n')[-1]
                 
-                # Máy hút bụi chữ rác: loại bỏ khoảng trắng, các ký hiệu lạ ở đầu, và chữ rác f, l, |...
                 desc_raw = re.sub(r'^[\s\n]+', '', desc_raw) 
                 desc_raw = re.sub(r'^[^a-zA-Z0-9]+', '', desc_raw) 
                 desc_raw = re.sub(r'^(?:[fFjJlLiI\|])\s+', '', desc_raw) 
                 desc_raw = re.sub(r'[-–—~_\s\n]+$', '', desc_raw) 
                 desc = clean_text(desc_raw)
 
-            # --- LOGIC 4: CẬP NHẬT TÌM HS CODES & ORIGINAL CO ---
             imp_match = re.search(r'(?i)IMPORTING\s+COUNTRY\s+HS\s+CODE\s+(\d{10})', block)
             imp_hs = imp_match.group(1)[:8] if imp_match else ""
             
@@ -689,6 +677,9 @@ def process_single_pdf(file_data):
         return {"error": f"{file_name}: Lỗi trích xuất - {str(e)}", "data": [], "file_name": file_name}
     return {"error": None, "data": extracted_data, "file_name": file_name}
 
+# ==========================================
+# 4. GIAO DIỆN STREAMLIT
+# ==========================================
 def init_session_state():
     if "pdf_files" not in st.session_state: st.session_state.pdf_files = []
     if "is_processing" not in st.session_state: st.session_state.is_processing = False
@@ -746,10 +737,19 @@ def main():
             uploaded_files = st.file_uploader("Kéo thả File vào đây", type=["pdf"], accept_multiple_files=True, disabled=st.session_state.is_processing)
             if uploaded_files:
                 st.session_state.pdf_files = uploaded_files
+                
+                # --- ĐOẠN CODE CẬP NHẬT GIAO DIỆN MỚI ---
+                file_count = len(st.session_state.pdf_files)
+                st.markdown(f"<p style='color: #059669; font-weight: 600; margin-bottom: 0.5rem;'>✅ Đã tải lên: {file_count} file</p>", unsafe_allow_html=True)
+                # ----------------------------------------
+                
                 with st.expander("🛠️ Quản lý tệp (Bấm để xem)", expanded=True):
                     with st.container(height=200):
                         for f in st.session_state.pdf_files: st.markdown(f"📄 `{f.name}`")
-            else: st.session_state.pdf_files = []
+            else: 
+                st.session_state.pdf_files = []
+                # Hiển thị số 0 khi không có file
+                st.markdown(f"<p style='color: #6B7280; font-weight: 600; margin-bottom: 0.5rem;'>📁 Đã tải lên: 0 file</p>", unsafe_allow_html=True)
 
         with col2:
             st.markdown("**2. Quá trình xử lý**")
