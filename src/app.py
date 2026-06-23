@@ -280,7 +280,7 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             pix_main = page.get_pixmap(matrix=mat, clip=main_rect)
             img_main = Image.frombytes("RGB", [pix_main.width, pix_main.height], pix_main.samples) if not pix_main.alpha else Image.frombytes("RGBA", [pix_main.width, pix_main.height], pix_main.samples).convert("RGB")
             main_text += "\n" + pytesseract.image_to_string(img_main, config=tess_config)
-            
+    logging.info(main_text)         
     box_13_str = extract_box13_scanned(pdf.pages[-1])
 
     matches = list(re.finditer(r'(?i)(?:N/M|N\s*/\s*M|N/W|M/N|N\.M)', main_text))
