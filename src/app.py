@@ -305,9 +305,7 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             qty, uom, usd, date_inv, origin_extra = "", "", "", "", ""
             usd_start_idx = -1
             
-            usd_pattern = r'(\d[\d\.,]*)\s+([A-Za-z]{2,})([^\n]{0,30}?)\s+(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{4})'
-            qd_match = re.search(usd_pattern, block, re.IGNORECASE)
-            
+            qd_match = re.search(r'(?:^|\s)(\d[\d\.,]*)\s+([A-Za-z]{2,})([^\n]{0,30}?)\s+(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{4})', block, re.IGNORECASE)
             if qd_match:
                 qty = qd_match.group(1).strip()
                 uom = qd_match.group(2).strip().upper()
