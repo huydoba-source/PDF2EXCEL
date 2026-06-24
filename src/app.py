@@ -304,10 +304,16 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
         item_no = str(i + 1)
 
         # =====================================================================
-        # 1. TIỀN XỬ LÝ LỖI OCR KINH ĐIỂN (S vs 5, | vs I)
+        # 1. TIỀN XỬ LÝ LỖI OCR KINH ĐIỂN (Đã fix lỗi Fixed-width Look-behind)
         # =====================================================================
-        # Bẫy sửa '5S' hoặc 'S' kề số thành '55' / '5' đứng trước Đơn vị tính
-        block_fixed = re.sub(r"(?<=\b|\d)S(?=\s+[A-Z]{2,5}\b)", "5", block)
+        
+        # Bẫy 1: Chữ S đứng đầu 1 từ độc lập (Preceded by \b) -> VD: " S PCE " -> " 5 PCE "
+        block_fixed = re.sub(r"\bS(?=\s+[A-Z]{2,5}\b)", "5", block)
+
+        # Bẫy 2: Chữ S dính liền ngay sau 1 chữ số (Preceded by \d) -> VD: "5S PCE" -> "55 PCE"
+        block_fixed = re.sub(r"(?<=\d)S(?=\s+[A-Z]{2,5}\b)", "5", block_fixed)
+
+        # Bẫy 3: Chữ S kẹp giữa khoảng trắng và 1 con số -> VD: " S 155.00 " -> " 5 155.00 "
         block_fixed = re.sub(r"(?<=\s)S(?=\s+[\d\.\,\+])", "5", block_fixed)
 
         qty, uom, usd, date_inv = "", "", "", ""
@@ -362,7 +368,6 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
                 break
 
         # --- INVOICE NUMBER (Xóa sổ ký tự rác OCR như [ | { ) ---
-        # Bắt chặt định dạng chuẩn Decathlon: VN + 6-8 số + gạch nối + 1 số
         inv_m = re.search(r"\b([VY]N\d{6,8}\-\d)", block_fixed, re.IGNORECASE)
         if inv_m:
           invoice = inv_m.group(1).upper().replace("YN", "VN")
@@ -388,7 +393,7 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
         )
         exp_hs = exp_m.group(1)[:8] if exp_m else ""
 
-        # --- ORIGINAL CO REFERENCE (Áp dụng Quy tắc "Phần 4 kết thúc bằng A") ---
+        # --- ORIGINAL CO REFERENCE ---
         co_m = re.search(
             r"([A-Z]{3,8})\s*[\/\-]\s*(\d{4})\s*[\/\-]\s*(\d{3,4})\s*[\/\-]\s*([A-Z0-9]+)\s*[\/\-]\s*(\d+)",
             block_fixed,
@@ -401,7 +406,6 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
           p4 = co_m.group(4).upper()
           p5 = co_m.group(5)
 
-          # Sửa lỗi Phần 4 theo đúng nghiệp vụ
           if p4.endswith("4"):
             p4 = p4[:-1] + "A"
           elif p4.endswith("A4"):
@@ -409,7 +413,6 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
           elif not p4.endswith("A"):
             p4 = (p4[:-1] + "A") if p4[-1].isalpha() else (p4 + "A")
 
-          # Sửa Phần 5: Cắt rác ký tự chữ, ép lấy đúng tối đa 8 chữ số đầu tiên
           p5_clean = re.sub(r"\D.*$", "", p5)[:8]
           orig_co = f"{p1}/{p2}/{p3}/{p4}/{p5_clean}"
         else:
@@ -426,24 +429,21 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
         orig_date = iss_m.group(1).upper() if iss_m else ""
 
         # =====================================================================
-        # 3. BÓC TÁCH ORIGIN CRITERIA (Thuật toán ghép đôi Multi-line)
+        # 3. BÓC TÁCH ORIGIN CRITERIA 
         # =====================================================================
         part1, part2 = "", ""
-        # Tìm nửa đầu của RVC (VD: "RVC 96.75% +")
         rvc_m = re.search(
             r"(RVC\s*[\d\.,]+%\s*\+?)", block_fixed, re.IGNORECASE
         )
         if rvc_m:
           part1 = re.sub(r"\s+", " ", rvc_m.group(1)).upper().replace(",", ".")
 
-        # Tìm nửa sau (CTSH / CTH / CC) rải rác trong block
         sub_m = re.search(r"\b(CTSH|CTH|CC)\b", block_fixed)
         if sub_m:
           part2 = sub_m.group(1).upper()
 
         if part1:
           origin = f"{part1} {part2}".strip()
-          # Nếu rớt lại dấu '+' do không tìm thấy part 2 thì gọt bỏ
           if origin.endswith("+") and not part2:
             origin = origin[:-1].strip()
         elif part2:
@@ -478,12 +478,10 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
               flags=re.IGNORECASE,
           )
 
-        # Xóa các cụm Origin ra khỏi văn bản mô tả
         raw_desc = re.sub(
             r"\b(RVC|WO|PE|CTSH|CTH|CC|PSR)\b[\d\.\+%\s]*", "", raw_desc
         )
 
-        # TỈA ĐUÔI CỰC MẠNH (Dọn sạch các tàn dư như "- 36 PCE" hay "- USD 115.22")
         raw_desc = re.sub(
             r"[-–—]\s*\d+[\d\.,]*\s*[A-Z]{2,5}\s*$",
             "",
