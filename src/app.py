@@ -303,29 +303,45 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
         block = main_text[start:end]
         item_no = str(i + 1)
 
-        # 1. BẪY SỬA 'S' THÀNH '5' BẰNG NGỮ PHÁP (Không dùng từ điển)
-        block_fixed = re.sub(r"\bS(?=\s+[A-Z]{2,5}\b)", "5", block)
+        # =====================================================================
+        # 1. TIỀN XỬ LÝ LỖI OCR KINH ĐIỂN (S vs 5, | vs I)
+        # =====================================================================
+        # Bẫy sửa '5S' hoặc 'S' kề số thành '55' / '5' đứng trước Đơn vị tính
+        block_fixed = re.sub(r"(?<=\b|\d)S(?=\s+[A-Z]{2,5}\b)", "5", block)
         block_fixed = re.sub(r"(?<=\s)S(?=\s+[\d\.\,\+])", "5", block_fixed)
 
         qty, uom, usd, date_inv = "", "", "", ""
-        carton, invoice, origin, desc = "", "", "", ""
+        carton, invoice, origin, desc, orig_co, orig_date = (
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+        )
 
-        # 2. BÓC TÁCH ĐỘNG
+        # =====================================================================
+        # 2. BÓC TÁCH CÁC TRƯỜNG ĐỊNH LƯỢNG & MÃ HÓA
+        # =====================================================================
+
+        # --- CARTON ---
         c_match = re.search(
             r"(\d+)[A-Za-z]*\s*CARTON", block_fixed, re.IGNORECASE
         )
         carton = c_match.group(1) if c_match else ""
 
+        # --- DATE OF INVOICE ---
         d_match = re.search(r"\b(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{4})\b", block_fixed)
         if d_match:
           date_inv = d_match.group(1)
 
-        # CỘT UOM ĐƯỢC GIẢI PHÓNG TỰ DO Ở ĐÂY:
+        # --- QUANTITY & UOM (Động hoàn toàn) ---
         qu_match = re.search(r"\b(\d+[\d\.,]*)\s+([A-Z]{2,5})\b", block_fixed)
         if qu_match:
           qty = qu_match.group(1).replace(",", "")
-          uom = qu_match.group(2)  # Nhận mọi giá trị động
+          uom = qu_match.group(2)
 
+        # --- USD (Cơ chế Fallback 3 tầng) ---
         usd_match = re.search(r"USD\s*([\d\.,]+)", block_fixed, re.IGNORECASE)
         if usd_match:
           usd = usd_match.group(1).replace(",", "")
@@ -345,62 +361,115 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
                 usd = dec
                 break
 
-        vn_match = re.search(
-            r"([VY]N[A-Z0-9\-]+(?:.*?IN)?)", block_fixed, re.IGNORECASE
-        )
-        if vn_match:
-          raw_inv = vn_match.group(1).strip().upper()
-          if raw_inv.startswith("YN"):
-            raw_inv = "VN" + raw_inv[2:]
-          invoice = re.split(r"\s{2,}|\n", raw_inv)[0].strip()
-          if form_type == "AI" and not invoice.endswith("IN"):
-            invoice = (
-                re.sub(r"[\/\\\|\?\]\[\}]+$", "", invoice).strip() + " IN"
-            )
+        # --- INVOICE NUMBER (Xóa sổ ký tự rác OCR như [ | { ) ---
+        # Bắt chặt định dạng chuẩn Decathlon: VN + 6-8 số + gạch nối + 1 số
+        inv_m = re.search(r"\b([VY]N\d{6,8}\-\d)", block_fixed, re.IGNORECASE)
+        if inv_m:
+          invoice = inv_m.group(1).upper().replace("YN", "VN")
+          if form_type == "AI":
+            invoice += " IN"
+        else:
+          vn_m = re.search(r"([VY]N[A-Z0-9\-]+)", block_fixed, re.IGNORECASE)
+          if vn_m:
+            invoice = vn_m.group(1).upper().replace("YN", "VN")
+            if form_type == "AI" and not invoice.endswith("IN"):
+              invoice += " IN"
 
-        imp_match = re.search(
+        # --- HS CODE ---
+        imp_m = re.search(
             r"(?i)IMPORTING\s+COUNTRY\s+HS\s+CODE\s*[:\-]?\s*(\d{8,10})",
             block_fixed,
         )
-        imp_hs = imp_match.group(1)[:8] if imp_match else ""
+        imp_hs = imp_m.group(1)[:8] if imp_m else ""
 
-        exp_match = re.search(
+        exp_m = re.search(
             r"(?i)EXPORTING\s+COUNTRY\s+HS\s+CODE\s*[:\-]?\s*(\d{8,10})",
             block_fixed,
         )
-        exp_hs = exp_match.group(1)[:8] if exp_match else ""
+        exp_hs = exp_m.group(1)[:8] if exp_m else ""
 
-        orig_match = re.search(
-            r"(?is)CO\s+Reference\s+Number[\s:,\-]*\n*(.*?)(?=\n*Issuance|\n*Date|\n*Page|\n*TOTAL|$)",
+        # --- ORIGINAL CO REFERENCE (Áp dụng Quy tắc "Phần 4 kết thúc bằng A") ---
+        co_m = re.search(
+            r"([A-Z]{3,8})\s*[\/\-]\s*(\d{4})\s*[\/\-]\s*(\d{3,4})\s*[\/\-]\s*([A-Z0-9]+)\s*[\/\-]\s*(\d+)",
             block_fixed,
+            re.IGNORECASE,
         )
-        orig_co = re.sub(r"\s+", "", orig_match.group(1)) if orig_match else ""
+        if co_m:
+          p1 = co_m.group(1).upper()
+          p2 = co_m.group(2)
+          p3 = co_m.group(3)
+          p4 = co_m.group(4).upper()
+          p5 = co_m.group(5)
 
-        iss_match = re.search(
+          # Sửa lỗi Phần 4 theo đúng nghiệp vụ
+          if p4.endswith("4"):
+            p4 = p4[:-1] + "A"
+          elif p4.endswith("A4"):
+            p4 = p4[:-1]
+          elif not p4.endswith("A"):
+            p4 = (p4[:-1] + "A") if p4[-1].isalpha() else (p4 + "A")
+
+          # Sửa Phần 5: Cắt rác ký tự chữ, ép lấy đúng tối đa 8 chữ số đầu tiên
+          p5_clean = re.sub(r"\D.*$", "", p5)[:8]
+          orig_co = f"{p1}/{p2}/{p3}/{p4}/{p5_clean}"
+        else:
+          raw_co = re.search(
+              r"(?is)CO\s+Reference\s+Number[\s:,\-]*\n*(.*?)(?=\n*Issuance|\n*Date|\n*Page|\n*TOTAL|$)",
+              block_fixed,
+          )
+          if raw_co:
+            orig_co = clean_text(raw_co.group(1).split("\n")[0])
+
+        iss_m = re.search(
             r"(?i)Issuance\s+Date:\s*\n*(\d{1,2}-[A-Za-z]{3}-\d{4})", block_fixed
         )
-        orig_date = iss_match.group(1).upper() if iss_match else ""
+        orig_date = iss_m.group(1).upper() if iss_m else ""
 
-        # 3. TRỪ LÙI ĐỂ LẤY MÔ TẢ
+        # =====================================================================
+        # 3. BÓC TÁCH ORIGIN CRITERIA (Thuật toán ghép đôi Multi-line)
+        # =====================================================================
+        part1, part2 = "", ""
+        # Tìm nửa đầu của RVC (VD: "RVC 96.75% +")
+        rvc_m = re.search(
+            r"(RVC\s*[\d\.,]+%\s*\+?)", block_fixed, re.IGNORECASE
+        )
+        if rvc_m:
+          part1 = re.sub(r"\s+", " ", rvc_m.group(1)).upper().replace(",", ".")
+
+        # Tìm nửa sau (CTSH / CTH / CC) rải rác trong block
+        sub_m = re.search(r"\b(CTSH|CTH|CC)\b", block_fixed)
+        if sub_m:
+          part2 = sub_m.group(1).upper()
+
+        if part1:
+          origin = f"{part1} {part2}".strip()
+          # Nếu rớt lại dấu '+' do không tìm thấy part 2 thì gọt bỏ
+          if origin.endswith("+") and not part2:
+            origin = origin[:-1].strip()
+        elif part2:
+          origin = part2
+        else:
+          wo_m = re.search(r"\b(WO|PE|PSR)\b", block_fixed)
+          if wo_m:
+            origin = wo_m.group(1).upper()
+
+        # =====================================================================
+        # 4. TRỪ LÙI VÀ TỈA ĐUÔI ĐỂ LẤY ENGLISH DESCRIPTION
+        # =====================================================================
         desc_zone = re.split(
             r"(?i)(?:IMPORTING\s+COUNTRY|Original\s+CO|TOTAL|Page)", block_fixed
         )[0]
-        zone_lines = desc_zone.split("\n")
-        clean_lines = []
-        for line in zone_lines:
-          l_str = line.strip()
-          if not l_str or "N/M" in l_str or "CARTON" in l_str.upper():
-            continue
-          clean_lines.append(l_str)
-
+        clean_lines = [
+            l.strip()
+            for l in desc_zone.split("\n")
+            if l.strip() and not re.search(r"N/M|\bCARTONS?\b", l, re.I)
+        ]
         raw_desc = " ".join(clean_lines)
 
         if usd:
           raw_desc = re.sub(r"(?i)USD\s*" + re.escape(usd), "", raw_desc)
         if date_inv:
           raw_desc = raw_desc.replace(date_inv, "")
-
-        # Trừ đi chính cái UOM động vừa tóm được:
         if qty and uom:
           raw_desc = re.sub(
               r"\b" + re.escape(qty) + r"\s+" + re.escape(uom) + r"\b",
@@ -409,20 +478,28 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
               flags=re.IGNORECASE,
           )
 
+        # Xóa các cụm Origin ra khỏi văn bản mô tả
         raw_desc = re.sub(
-            r"(?i)\b(?:WO|RVC\s*[\d\.]+%\s*\+?|CTSH|CTH|CC|PE)\b", "", raw_desc
+            r"\b(RVC|WO|PE|CTSH|CTH|CC|PSR)\b[\d\.\+%\s]*", "", raw_desc
         )
+
+        # TỈA ĐUÔI CỰC MẠNH (Dọn sạch các tàn dư như "- 36 PCE" hay "- USD 115.22")
+        raw_desc = re.sub(
+            r"[-–—]\s*\d+[\d\.,]*\s*[A-Z]{2,5}\s*$",
+            "",
+            raw_desc,
+            flags=re.IGNORECASE,
+        ).strip()
+        raw_desc = re.sub(
+            r"[-–—]\s*(?:USD|EUR|VND)?\s*\d+[\d\.,]*\s*$",
+            "",
+            raw_desc,
+            flags=re.IGNORECASE,
+        ).strip()
         raw_desc = re.sub(r"[-–—:;\,\.\s]+$", "", raw_desc).strip()
-        raw_desc = re.sub(r"\s+[a-z]{1,2}$", "", raw_desc).strip()
+        raw_desc = re.sub(r"\s+[a-zA-Z]{1,2}$", "", raw_desc).strip()
 
         desc = clean_text(raw_desc)
-
-        origin_match = re.search(
-            r"(?i)\d+[A-Za-z]*\s*CARTON\s+([A-Z\s\.\+0-9\%]{2,15}?)(?=\s*\d|\s*$)",
-            block_fixed,
-        )
-        if origin_match:
-          origin = clean_text(origin_match.group(1))
 
         extracted_data.append({
             COLUMNS[0]: form_type,
