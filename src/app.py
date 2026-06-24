@@ -280,7 +280,7 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             pix_main = page.get_pixmap(matrix=mat, clip=main_rect)
             img_main = Image.frombytes("RGB", [pix_main.width, pix_main.height], pix_main.samples) if not pix_main.alpha else Image.frombytes("RGBA", [pix_main.width, pix_main.height], pix_main.samples).convert("RGB")
             main_text += "\n" + pytesseract.image_to_string(img_main, config=tess_config)
-    logging.info(main_text)         
+            
     box_13_str = extract_box13_scanned(pdf.pages[-1])
 
     matches = list(re.finditer(r'(?i)(?:N/M|N\s*/\s*M|N/W|M/N|N\.M)', main_text))
@@ -295,236 +295,125 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             COLUMNS[21]: exported_to, COLUMNS[22]: "", COLUMNS[23]: box_13_str
         })
     else:
-      for i in range(len(matches)):
-        start = matches[i].start()
-        end = (
-            matches[i + 1].start() if i + 1 < len(matches) else len(main_text)
-        )
-        block = main_text[start:end]
-        item_no = str(i + 1)
+        for i in range(len(matches)):
+            start = matches[i].start()
+            end = matches[i+1].start() if i + 1 < len(matches) else len(main_text)
+            block = main_text[start:end]
+            item_no = str(i + 1)
 
-        # =====================================================================
-        # 1. TIỀN XỬ LÝ LỖI OCR KINH ĐIỂN (Đã fix lỗi Fixed-width Look-behind)
-        # =====================================================================
-        
-        # Bẫy 1: Chữ S đứng đầu 1 từ độc lập (Preceded by \b) -> VD: " S PCE " -> " 5 PCE "
-        block_fixed = re.sub(r"\bS(?=\s+[A-Z]{2,5}\b)", "5", block)
+            # =================================================================
+            # 1. TIỀN XỬ LÝ LỖI OCR KINH ĐIỂN (Đã fix lỗi Fixed-width Look-behind)
+            # =================================================================
+            block_fixed = re.sub(r"\bS(?=\s+[A-Z]{2,5}\b)", "5", block)
+            block_fixed = re.sub(r"(?<=\d)S(?=\s+[A-Z]{2,5}\b)", "5", block_fixed)
+            block_fixed = re.sub(r"(?<=\s)S(?=\s+[\d\.\,\+])", "5", block_fixed)
 
-        # Bẫy 2: Chữ S dính liền ngay sau 1 chữ số (Preceded by \d) -> VD: "5S PCE" -> "55 PCE"
-        block_fixed = re.sub(r"(?<=\d)S(?=\s+[A-Z]{2,5}\b)", "5", block_fixed)
+            qty, uom, usd, date_inv = "", "", "", ""
+            carton, invoice, origin, desc, orig_co, orig_date = "", "", "", "", "", ""
 
-        # Bẫy 3: Chữ S kẹp giữa khoảng trắng và 1 con số -> VD: " S 155.00 " -> " 5 155.00 "
-        block_fixed = re.sub(r"(?<=\s)S(?=\s+[\d\.\,\+])", "5", block_fixed)
+            # --- CARTON ---
+            c_match = re.search(r'(\d+)[A-Za-z]*\s*CARTON', block_fixed, re.IGNORECASE)
+            carton = c_match.group(1) if c_match else ""
 
-        qty, uom, usd, date_inv = "", "", "", ""
-        carton, invoice, origin, desc, orig_co, orig_date = (
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-        )
+            # --- DATE OF INVOICE ---
+            d_match = re.search(r'\b(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{4})\b', block_fixed)
+            if d_match: date_inv = d_match.group(1)
 
-        # =====================================================================
-        # 2. BÓC TÁCH CÁC TRƯỜNG ĐỊNH LƯỢNG & MÃ HÓA
-        # =====================================================================
+            # --- QUANTITY & UOM ---
+            qu_match = re.search(r'\b(\d+[\d\.,]*)\s+([A-Z]{2,5})\b', block_fixed)
+            if qu_match:
+                qty = qu_match.group(1).replace(',', '')
+                uom = qu_match.group(2)
 
-        # --- CARTON ---
-        c_match = re.search(
-            r"(\d+)[A-Za-z]*\s*CARTON", block_fixed, re.IGNORECASE
-        )
-        carton = c_match.group(1) if c_match else ""
+            # --- USD ---
+            usd_match = re.search(r'USD\s*([\d\.,]+)', block_fixed, re.IGNORECASE)
+            if usd_match:
+                usd = usd_match.group(1).replace(',', '')
+            else:
+                if date_inv:
+                    fb_match = re.search(r'\b(\d+[\.,]\d{2})\s*(?:[A-Za-z\s]{0,10})?' + re.escape(date_inv), block_fixed)
+                    if fb_match: usd = fb_match.group(1).replace(',', '.')
+                if not usd:
+                    decimals = re.findall(r'\b(\d+\.\d{2})\b', block_fixed)
+                    for dec in decimals:
+                        if dec != qty:
+                            usd = dec; break
 
-        # --- DATE OF INVOICE ---
-        d_match = re.search(r"\b(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{4})\b", block_fixed)
-        if d_match:
-          date_inv = d_match.group(1)
+            # --- INVOICE NUMBER ---
+            inv_m = re.search(r'\b([VY]N\d{6,8}\-\d)', block_fixed, re.IGNORECASE)
+            if inv_m:
+                invoice = inv_m.group(1).upper().replace('YN', 'VN')
+                if form_type == "AI": invoice += " IN"
+            else:
+                vn_m = re.search(r'([VY]N[A-Z0-9\-]+)', block_fixed, re.IGNORECASE)
+                if vn_m:
+                    invoice = vn_m.group(1).upper().replace('YN', 'VN')
+                    if form_type == "AI" and not invoice.endswith("IN"):
+                        invoice += " IN"
 
-        # --- QUANTITY & UOM (Động hoàn toàn) ---
-        qu_match = re.search(r"\b(\d+[\d\.,]*)\s+([A-Z]{2,5})\b", block_fixed)
-        if qu_match:
-          qty = qu_match.group(1).replace(",", "")
-          uom = qu_match.group(2)
+            # --- HS CODE ---
+            imp_m = re.search(r'(?i)IMPORTING\s+COUNTRY\s+HS\s+CODE\s*[:\-]?\s*(\d{8,10})', block_fixed)
+            imp_hs = imp_m.group(1)[:8] if imp_m else ""
 
-        # --- USD (Cơ chế Fallback 3 tầng) ---
-        usd_match = re.search(r"USD\s*([\d\.,]+)", block_fixed, re.IGNORECASE)
-        if usd_match:
-          usd = usd_match.group(1).replace(",", "")
-        else:
-          if date_inv:
-            fb_match = re.search(
-                r"\b(\d+[\.,]\d{2})\s*(?:[A-Za-z\s]{0,10})?"
-                + re.escape(date_inv),
-                block_fixed,
-            )
-            if fb_match:
-              usd = fb_match.group(1).replace(",", ".")
-          if not usd:
-            decimals = re.findall(r"\b(\d+\.\d{2})\b", block_fixed)
-            for dec in decimals:
-              if dec != qty:
-                usd = dec
-                break
+            exp_m = re.search(r'(?i)EXPORTING\s+COUNTRY\s+HS\s+CODE\s*[:\-]?\s*(\d{8,10})', block_fixed)
+            exp_hs = exp_m.group(1)[:8] if exp_m else ""
 
-        # --- INVOICE NUMBER (Xóa sổ ký tự rác OCR như [ | { ) ---
-        inv_m = re.search(r"\b([VY]N\d{6,8}\-\d)", block_fixed, re.IGNORECASE)
-        if inv_m:
-          invoice = inv_m.group(1).upper().replace("YN", "VN")
-          if form_type == "AI":
-            invoice += " IN"
-        else:
-          vn_m = re.search(r"([VY]N[A-Z0-9\-]+)", block_fixed, re.IGNORECASE)
-          if vn_m:
-            invoice = vn_m.group(1).upper().replace("YN", "VN")
-            if form_type == "AI" and not invoice.endswith("IN"):
-              invoice += " IN"
+            # =================================================================
+            # --- ORIGINAL CO REFERENCE NUMBER (Áp dụng chuẩn logic origin_true) ---
+            # =================================================================
+            orig_match = re.search(r'(?is)CO\s+Reference\s+Number[\s:,\-]*\n*(.*?)(?=\n*Issuance|\n*Date|\n*Page|\n*TOTAL|$)', block_fixed)
+            if orig_match:
+                orig_co_raw = orig_match.group(1).strip()
+                orig_co = re.sub(r'\s+', '', orig_co_raw)
 
-        # --- HS CODE ---
-        imp_m = re.search(
-            r"(?i)IMPORTING\s+COUNTRY\s+HS\s+CODE\s*[:\-]?\s*(\d{8,10})",
-            block_fixed,
-        )
-        imp_hs = imp_m.group(1)[:8] if imp_m else ""
+            iss_m = re.search(r'(?i)Issuance\s+Date:\s*\n*(\d{1,2}-[A-Za-z]{3}-\d{4})', block_fixed)
+            orig_date = iss_m.group(1).upper() if iss_m else ""
 
-        exp_m = re.search(
-            r"(?i)EXPORTING\s+COUNTRY\s+HS\s+CODE\s*[:\-]?\s*(\d{8,10})",
-            block_fixed,
-        )
-        exp_hs = exp_m.group(1)[:8] if exp_m else ""
+            # --- ORIGIN CRITERIA ---
+            part1, part2 = "", ""
+            rvc_m = re.search(r'(RVC\s*[\d\.,]+%\s*\+?)', block_fixed, re.IGNORECASE)
+            if rvc_m: part1 = re.sub(r'\s+', ' ', rvc_m.group(1)).upper().replace(',', '.')
 
-        # --- ORIGINAL CO REFERENCE ---
-        co_m = re.search(
-            r"([A-Z]{3,8})\s*[\/\-]\s*(\d{4})\s*[\/\-]\s*(\d{3,4})\s*[\/\-]\s*([A-Z0-9]+)\s*[\/\-]\s*(\d+)",
-            block_fixed,
-            re.IGNORECASE,
-        )
-        if co_m:
-          p1 = co_m.group(1).upper()
-          p2 = co_m.group(2)
-          p3 = co_m.group(3)
-          p4 = co_m.group(4).upper()
-          p5 = co_m.group(5)
+            sub_m = re.search(r'\b(CTSH|CTH|CC)\b', block_fixed)
+            if sub_m: part2 = sub_m.group(1).upper()
 
-          if p4.endswith("4"):
-            p4 = p4[:-1] + "A"
-          elif p4.endswith("A4"):
-            p4 = p4[:-1]
-          elif not p4.endswith("A"):
-            p4 = (p4[:-1] + "A") if p4[-1].isalpha() else (p4 + "A")
+            if part1:
+                origin = f"{part1} {part2}".strip()
+                if origin.endswith('+') and not part2: origin = origin[:-1].strip()
+            elif part2: origin = part2
+            else:
+                wo_m = re.search(r'\b(WO|PE|PSR)\b', block_fixed)
+                if wo_m: origin = wo_m.group(1).upper()
 
-          p5_clean = re.sub(r"\D.*$", "", p5)[:8]
-          orig_co = f"{p1}/{p2}/{p3}/{p4}/{p5_clean}"
-        else:
-          raw_co = re.search(
-              r"(?is)CO\s+Reference\s+Number[\s:,\-]*\n*(.*?)(?=\n*Issuance|\n*Date|\n*Page|\n*TOTAL|$)",
-              block_fixed,
-          )
-          if raw_co:
-            orig_co = clean_text(raw_co.group(1).split("\n")[0])
+            # --- DESCRIPTION ---
+            desc_zone = re.split(r'(?i)(?:IMPORTING\s+COUNTRY|Original\s+CO|TOTAL|Page)', block_fixed)[0]
+            clean_lines = [l.strip() for l in desc_zone.split('\n') if l.strip() and not re.search(r'N/M|\bCARTONS?\b', l, re.I)]
+            raw_desc = " ".join(clean_lines)
 
-        iss_m = re.search(
-            r"(?i)Issuance\s+Date:\s*\n*(\d{1,2}-[A-Za-z]{3}-\d{4})", block_fixed
-        )
-        orig_date = iss_m.group(1).upper() if iss_m else ""
+            if usd: raw_desc = re.sub(r'(?i)USD\s*' + re.escape(usd), '', raw_desc)
+            if date_inv: raw_desc = raw_desc.replace(date_inv, '')
+            if qty and uom: 
+                raw_desc = re.sub(r'\b' + re.escape(qty) + r'\s+' + re.escape(uom) + r'\b', '', raw_desc, flags=re.IGNORECASE)
 
-        # =====================================================================
-        # 3. BÓC TÁCH ORIGIN CRITERIA 
-        # =====================================================================
-        part1, part2 = "", ""
-        rvc_m = re.search(
-            r"(RVC\s*[\d\.,]+%\s*\+?)", block_fixed, re.IGNORECASE
-        )
-        if rvc_m:
-          part1 = re.sub(r"\s+", " ", rvc_m.group(1)).upper().replace(",", ".")
+            raw_desc = re.sub(r'\b(RVC|WO|PE|CTSH|CTH|CC|PSR)\b[\d\.\+%\s]*', '', raw_desc)
 
-        sub_m = re.search(r"\b(CTSH|CTH|CC)\b", block_fixed)
-        if sub_m:
-          part2 = sub_m.group(1).upper()
+            raw_desc = re.sub(r'[-–—]\s*\d+[\d\.,]*\s*[A-Z]{2,5}\s*$', '', raw_desc, flags=re.IGNORECASE).strip()
+            raw_desc = re.sub(r'[-–—]\s*(?:USD|EUR|VND)?\s*\d+[\d\.,]*\s*$', '', raw_desc, flags=re.IGNORECASE).strip()
+            raw_desc = re.sub(r'[-–—:;\,\.\s]+$', '', raw_desc).strip()
+            raw_desc = re.sub(r'\s+[a-zA-Z]{1,2}$', '', raw_desc).strip()
 
-        if part1:
-          origin = f"{part1} {part2}".strip()
-          if origin.endswith("+") and not part2:
-            origin = origin[:-1].strip()
-        elif part2:
-          origin = part2
-        else:
-          wo_m = re.search(r"\b(WO|PE|PSR)\b", block_fixed)
-          if wo_m:
-            origin = wo_m.group(1).upper()
+            desc = clean_text(raw_desc)
 
-        # =====================================================================
-        # 4. TRỪ LÙI VÀ TỈA ĐUÔI ĐỂ LẤY ENGLISH DESCRIPTION
-        # =====================================================================
-        desc_zone = re.split(
-            r"(?i)(?:IMPORTING\s+COUNTRY|Original\s+CO|TOTAL|Page)", block_fixed
-        )[0]
-        clean_lines = [
-            l.strip()
-            for l in desc_zone.split("\n")
-            if l.strip() and not re.search(r"N/M|\bCARTONS?\b", l, re.I)
-        ]
-        raw_desc = " ".join(clean_lines)
-
-        if usd:
-          raw_desc = re.sub(r"(?i)USD\s*" + re.escape(usd), "", raw_desc)
-        if date_inv:
-          raw_desc = raw_desc.replace(date_inv, "")
-        if qty and uom:
-          raw_desc = re.sub(
-              r"\b" + re.escape(qty) + r"\s+" + re.escape(uom) + r"\b",
-              "",
-              raw_desc,
-              flags=re.IGNORECASE,
-          )
-
-        raw_desc = re.sub(
-            r"\b(RVC|WO|PE|CTSH|CTH|CC|PSR)\b[\d\.\+%\s]*", "", raw_desc
-        )
-
-        raw_desc = re.sub(
-            r"[-–—]\s*\d+[\d\.,]*\s*[A-Z]{2,5}\s*$",
-            "",
-            raw_desc,
-            flags=re.IGNORECASE,
-        ).strip()
-        raw_desc = re.sub(
-            r"[-–—]\s*(?:USD|EUR|VND)?\s*\d+[\d\.,]*\s*$",
-            "",
-            raw_desc,
-            flags=re.IGNORECASE,
-        ).strip()
-        raw_desc = re.sub(r"[-–—:;\,\.\s]+$", "", raw_desc).strip()
-        raw_desc = re.sub(r"\s+[a-zA-Z]{1,2}$", "", raw_desc).strip()
-
-        desc = clean_text(raw_desc)
-
-        extracted_data.append({
-            COLUMNS[0]: form_type,
-            COLUMNS[1]: reference_no,
-            COLUMNS[2]: clean_text(orig_co),
-            COLUMNS[3]: item_no,
-            COLUMNS[4]: desc,
-            COLUMNS[5]: clean_text(qty),
-            COLUMNS[6]: clean_text(uom),
-            COLUMNS[7]: usd,
-            COLUMNS[8]: origin,
-            COLUMNS[9]: imp_hs,
-            COLUMNS[10]: exp_hs,
-            COLUMNS[11]: invoice,
-            COLUMNS[12]: date_inv,
-            COLUMNS[13]: clean_text(carton),
-            COLUMNS[14]: clean_text(orig_date),
-            COLUMNS[15]: "",
-            COLUMNS[16]: date_cert,
-            COLUMNS[17]: exporter,
-            COLUMNS[18]: consignee,
-            COLUMNS[19]: transport,
-            COLUMNS[20]: produced_in,
-            COLUMNS[21]: exported_to,
-            COLUMNS[22]: "N/M",
-            COLUMNS[23]: box_13_str,
-        })
+            extracted_data.append({
+                COLUMNS[0]: form_type, COLUMNS[1]: reference_no, COLUMNS[2]: clean_text(orig_co),
+                COLUMNS[3]: item_no, COLUMNS[4]: desc, COLUMNS[5]: clean_text(qty),
+                COLUMNS[6]: clean_text(uom), COLUMNS[7]: usd, COLUMNS[8]: origin,
+                COLUMNS[9]: imp_hs, COLUMNS[10]: exp_hs, COLUMNS[11]: invoice,
+                COLUMNS[12]: date_inv, COLUMNS[13]: clean_text(carton), COLUMNS[14]: clean_text(orig_date),
+                COLUMNS[15]: "", COLUMNS[16]: date_cert, COLUMNS[17]: exporter,
+                COLUMNS[18]: consignee, COLUMNS[19]: transport, COLUMNS[20]: produced_in,
+                COLUMNS[21]: exported_to, COLUMNS[22]: "N/M", COLUMNS[23]: box_13_str
+            })
             
     logging.info(f"\n" + "="*70)
     logging.info(f"📊 KẾT QUẢ TRÍCH XUẤT (PyMuPDF + Tesseract) FILE: {file_name}")
