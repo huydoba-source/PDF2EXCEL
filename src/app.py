@@ -365,6 +365,35 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             if orig_match:
                 orig_co_raw = orig_match.group(1).strip()
                 orig_co = re.sub(r'\s+', '', orig_co_raw)
+                
+                # BỔ SUNG: Áp dụng riêng cho loại Form AI
+                if form_type == "AI":
+                    # Tách thành mảng dựa trên dấu / hoặc -
+                    co_parts = re.split(r'([/\-])', orig_co)
+                    
+                    # Cấu trúc CO chuẩn phải có tối thiểu 5 khối (tương đương len >= 9)
+                    if len(co_parts) >= 9:
+                        p4 = co_parts[6].upper()
+                        
+                        # Fix lỗi OCR ở khối thứ 4: Nếu đuôi là 4 thì ép về A
+                        if p4.endswith("4"):
+                            if p4.endswith("A4"):
+                                p4 = p4[:-1]
+                            else:
+                                p4 = p4[:-1] + "A"
+                        elif len(p4) > 0 and not p4.endswith("A"):
+                            p4 = (p4[:-1] + "A") if p4[-1].isalpha() else (p4 + "A")
+                            
+                        co_parts[6] = p4
+                        
+                        # Khối thứ 5 (nằm từ index 8 trở đi): Ép gọt cặn rác chữ cái OCR, giữ tối đa 8 số
+                        p5_raw = "".join(co_parts[8:])
+                        p5_clean = re.sub(r'\D.*$', '', p5_raw)[:8]
+                        if not p5_clean:
+                            p5_clean = p5_raw  # Fallback nếu khối 5 hoàn toàn không có số
+                            
+                        # Nối lại chuỗi (Ghép nguyên 4 khối đầu + khối cuối đã dọn dẹp)
+                        orig_co = "".join(co_parts[:8]) + p5_clean
 
             iss_m = re.search(r'(?i)Issuance\s+Date:\s*\n*(\d{1,2}-[A-Za-z]{3}-\d{4})', block_fixed)
             orig_date = iss_m.group(1).upper() if iss_m else ""
