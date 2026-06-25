@@ -280,8 +280,7 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             pix_main = page.get_pixmap(matrix=mat, clip=main_rect)
             img_main = Image.frombytes("RGB", [pix_main.width, pix_main.height], pix_main.samples) if not pix_main.alpha else Image.frombytes("RGBA", [pix_main.width, pix_main.height], pix_main.samples).convert("RGB")
             main_text += "\n" + pytesseract.image_to_string(img_main, config=tess_config)
-    
-    logging.info(main_text)        
+            
     box_13_str = extract_box13_scanned(pdf.pages[-1])
 
     matches = list(re.finditer(r'(?i)(?:N/M|N\s*/\s*M|N/W|M/N|N\.M)', main_text))
@@ -302,9 +301,9 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             block = main_text[start:end]
             item_no = str(i + 1)
 
-            # =================================================================
+            # =====================================================================
             # 1. TIỀN XỬ LÝ LỖI OCR KINH ĐIỂN (Đã fix lỗi Fixed-width Look-behind)
-            # =================================================================
+            # =====================================================================
             block_fixed = re.sub(r"\bS(?=\s+[A-Z]{2,5}\b)", "5", block)
             block_fixed = re.sub(r"(?<=\d)S(?=\s+[A-Z]{2,5}\b)", "5", block_fixed)
             block_fixed = re.sub(r"(?<=\s)S(?=\s+[\d\.\,\+])", "5", block_fixed)
@@ -360,23 +359,19 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             exp_hs = exp_m.group(1)[:8] if exp_m else ""
 
             # =================================================================
-            # --- ORIGINAL CO REFERENCE NUMBER (Áp dụng chuẩn logic origin_true) ---
+            # --- ORIGINAL CO REFERENCE NUMBER 
             # =================================================================
             orig_match = re.search(r'(?is)CO\s+Reference\s+Number[\s:,\-]*\n*(.*?)(?=\n*Issuance|\n*Date|\n*Page|\n*TOTAL|$)', block_fixed)
             if orig_match:
                 orig_co_raw = orig_match.group(1).strip()
                 orig_co = re.sub(r'\s+', '', orig_co_raw)
                 
-                # BỔ SUNG: Áp dụng riêng cho loại Form AI
                 if form_type == "AI":
-                    # Tách thành mảng dựa trên dấu / hoặc -
                     co_parts = re.split(r'([/\-])', orig_co)
                     
-                    # Cấu trúc CO chuẩn phải có tối thiểu 5 khối (tương đương len >= 9)
                     if len(co_parts) >= 9:
                         p4 = co_parts[6].upper()
                         
-                        # Fix lỗi OCR ở khối thứ 4: Nếu đuôi là 4 thì ép về A
                         if p4.endswith("4"):
                             if p4.endswith("A4"):
                                 p4 = p4[:-1]
@@ -387,35 +382,47 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
                             
                         co_parts[6] = p4
                         
-                        # Khối thứ 5 (nằm từ index 8 trở đi): Ép gọt cặn rác chữ cái OCR, giữ tối đa 8 số
                         p5_raw = "".join(co_parts[8:])
                         p5_clean = re.sub(r'\D.*$', '', p5_raw)[:8]
                         if not p5_clean:
-                            p5_clean = p5_raw  # Fallback nếu khối 5 hoàn toàn không có số
+                            p5_clean = p5_raw  
                             
-                        # Nối lại chuỗi (Ghép nguyên 4 khối đầu + khối cuối đã dọn dẹp)
                         orig_co = "".join(co_parts[:8]) + p5_clean
 
             iss_m = re.search(r'(?i)Issuance\s+Date:\s*\n*(\d{1,2}-[A-Za-z]{3}-\d{4})', block_fixed)
             orig_date = iss_m.group(1).upper() if iss_m else ""
 
-            # --- ORIGIN CRITERIA ---
+            # =================================================================
+            # --- ORIGIN CRITERIA (Đã fix Case Sensitivity và lỗi khoảng trắng RVC)
+            # =================================================================
             part1, part2 = "", ""
-            rvc_m = re.search(r'(RVC\s*[\d\.,]+%\s*\+?)', block_fixed, re.IGNORECASE)
-            if rvc_m: part1 = re.sub(r'\s+', ' ', rvc_m.group(1)).upper().replace(',', '.')
+            
+            # Mở rộng regex để chịu lỗi khoảng trắng trước/sau dấu %
+            rvc_m = re.search(r'(RVC\s*[\d\.,]+\s*%?\s*\+?)', block_fixed, re.IGNORECASE)
+            if rvc_m: 
+                part1 = re.sub(r'\s+', ' ', rvc_m.group(1)).upper().replace(',', '.')
 
-            sub_m = re.search(r'\b(CTSH|CTH|CC)\b', block_fixed)
-            if sub_m: part2 = sub_m.group(1).upper()
+            # Đảm bảo IGNORECASE cho các cụm CTSH, CTH...
+            sub_m = re.search(r'\b(CTSH|CTH|CC)\b', block_fixed, re.IGNORECASE)
+            if sub_m: 
+                part2 = sub_m.group(1).upper()
 
             if part1:
                 origin = f"{part1} {part2}".strip()
-                if origin.endswith('+') and not part2: origin = origin[:-1].strip()
-            elif part2: origin = part2
+                if origin.endswith('+') and not part2: 
+                    origin = origin[:-1].strip()
+            elif part2: 
+                origin = part2
             else:
-                wo_m = re.search(r'\b(WO|PE|PSR)\b', block_fixed)
-                if wo_m: origin = wo_m.group(1).upper()
+                # Bắt bọc lót tất cả các tình huống WO, wo, WoO, W O, PE, PSR
+                wo_m = re.search(r'\b(W\s*O|WoO|PE|PSR)\b', block_fixed, re.IGNORECASE)
+                if wo_m: 
+                    val = wo_m.group(1).upper().replace(' ', '')
+                    origin = "WO" if val == "WOO" or val == "WO" else val
 
+            # =================================================================
             # --- DESCRIPTION ---
+            # =================================================================
             desc_zone = re.split(r'(?i)(?:IMPORTING\s+COUNTRY|Original\s+CO|TOTAL|Page)', block_fixed)[0]
             clean_lines = [l.strip() for l in desc_zone.split('\n') if l.strip() and not re.search(r'N/M|\bCARTONS?\b', l, re.I)]
             raw_desc = " ".join(clean_lines)
@@ -425,7 +432,8 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             if qty and uom: 
                 raw_desc = re.sub(r'\b' + re.escape(qty) + r'\s+' + re.escape(uom) + r'\b', '', raw_desc, flags=re.IGNORECASE)
 
-            raw_desc = re.sub(r'\b(RVC|WO|PE|CTSH|CTH|CC|PSR)\b[\d\.\+%\s]*', '', raw_desc)
+            # Đảm bảo dọn sạch các tàn dư WoO/wo ra khỏi mô tả (Thêm IGNORECASE)
+            raw_desc = re.sub(r'\b(RVC|W\s*O|WoO|PE|CTSH|CTH|CC|PSR)\b[\d\.\+%\s]*', '', raw_desc, flags=re.IGNORECASE)
 
             raw_desc = re.sub(r'[-–—]\s*\d+[\d\.,]*\s*[A-Z]{2,5}\s*$', '', raw_desc, flags=re.IGNORECASE).strip()
             raw_desc = re.sub(r'[-–—]\s*(?:USD|EUR|VND)?\s*\d+[\d\.,]*\s*$', '', raw_desc, flags=re.IGNORECASE).strip()
