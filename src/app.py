@@ -30,7 +30,7 @@ pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
 COLUMNS = [
     "Form", "Reference No", "Original CO Reference Number", "Item Number",
     "English description", "Quantity - Box 9", "UOM - Box 9", 
-    "Quantity - Box 7", "UOM - Box 7", # <-- 2 CỘT MỚI ĐƯỢC CHÈN VÀO ĐÂY (H và I)
+    "Quantity - Box 7", "UOM - Box 7",
     "USD", "Origin criteria (see Overleaf Notes)",
     "IMPORTING COUNTRY HS CODE", "EXPORTING COUNTRY HS CODE", "Invoice Number",
     "Date of invoices", "CARTON", "Original CO Issuance Date", "Issuing Authority",
@@ -300,10 +300,9 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             COLUMNS[0]: form_type, COLUMNS[1]: reference_no, COLUMNS[2]: "", COLUMNS[3]: "",
             COLUMNS[4]: "[Lỗi OCR] Không tìm thấy dữ liệu Item.", COLUMNS[5]: "", COLUMNS[6]: "", 
             COLUMNS[7]: "", COLUMNS[8]: "", COLUMNS[9]: "", COLUMNS[10]: "", COLUMNS[11]: "", 
-            COLUMNS[12]: "", COLUMNS[13]: "", COLUMNS[14]: "", COLUMNS[15]: "", COLUMNS[16]: "",
-            COLUMNS[17]: "", COLUMNS[18]: date_cert, COLUMNS[19]: exporter, COLUMNS[20]: consignee, 
-            COLUMNS[21]: transport, COLUMNS[22]: produced_in, COLUMNS[23]: exported_to, 
-            COLUMNS[24]: "", COLUMNS[25]: box_13_str, COLUMNS[26]: third_party_val
+            COLUMNS[12]: "", COLUMNS[13]: "", COLUMNS[14]: "", COLUMNS[15]: "", COLUMNS[16]: date_cert, 
+            COLUMNS[17]: exporter, COLUMNS[18]: consignee, COLUMNS[19]: transport, COLUMNS[20]: produced_in, 
+            COLUMNS[21]: exported_to, COLUMNS[22]: "", COLUMNS[23]: box_13_str, COLUMNS[24]: third_party_val
         })
     else:
         for i in range(len(matches)):
@@ -374,7 +373,6 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
                 
                 if form_type == "AI":
                     co_parts = re.split(r'([/\-])', orig_co)
-                    
                     if len(co_parts) >= 9:
                         p4 = co_parts[6].upper()
                         if p4.endswith("4"):
@@ -420,13 +418,28 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             clean_lines = [l.strip() for l in desc_zone.split('\n') if l.strip() and not re.search(r'N/M|\bCARTONS?\b', l, re.I)]
             raw_desc = " ".join(clean_lines)
 
-            # --- [NEW] TRÍCH XUẤT BOX 7 QUANTITY VÀ UOM TỪ MÔ TẢ CHO FILE SCAN ---
+            # --- [NEW] TRÍCH XUẤT BOX 7 QUANTITY VÀ UOM (DÙNG TỪ KHÓA IMPORTING LÀM ĐIỂM NEO) ---
             qty_box7, uom_box7 = "", ""
-            box7_match = re.search(r'[-–—]\s*(\d+[\d\.,]*)\s*([A-Za-z]{2,5})\b', raw_desc)
+            box7_match = re.search(r'[-–—]\s*(\d+[\d\.,]*)\s*([A-Za-z]{2,8})\b', raw_desc)
             if box7_match:
                 qty_box7 = box7_match.group(1).replace(',', '')
                 uom_box7 = box7_match.group(2).upper()
-            # ---------------------------------------------------------------------
+            else:
+                # Tìm số lượng nằm sát ngay trước cụm từ IMPORTING COUNTRY
+                box7_match_2 = re.search(r'(\d+[\d\.,]*)\s*([A-Za-z]{2,8})\s*(?:\n|\s)*IMPORTING\s+COUNTRY', block_fixed, re.IGNORECASE)
+                if box7_match_2:
+                    qty_box7 = box7_match_2.group(1).replace(',', '')
+                    uom_box7 = box7_match_2.group(2).upper()
+                else:
+                    box7_match_3 = re.search(r'(?:\s|^)(\d+[\d\.,]*)\s*([A-Za-z]{2,8})\s*$', raw_desc)
+                    if box7_match_3:
+                        qty_box7 = box7_match_3.group(1).replace(',', '')
+                        uom_box7 = box7_match_3.group(2).upper()
+
+            # Xóa đoạn định lượng BOX 7 vừa tìm được khỏi mô tả
+            if qty_box7 and uom_box7:
+                raw_desc = re.sub(r'[-–—]?\s*' + re.escape(qty_box7) + r'[\s\n]*' + re.escape(uom_box7) + r'\b', '', raw_desc, flags=re.IGNORECASE).strip()
+            # ----------------------------------------------------------------------------------
 
             if usd: raw_desc = re.sub(r'(?i)USD\s*' + re.escape(usd), '', raw_desc)
             if date_inv: raw_desc = raw_desc.replace(date_inv, '')
@@ -434,9 +447,7 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
                 raw_desc = re.sub(r'\b' + re.escape(qty) + r'\s+' + re.escape(uom) + r'\b', '', raw_desc, flags=re.IGNORECASE)
 
             raw_desc = re.sub(r'\b(RVC|W\s*O|WoO|PE|CTSH|CTH|CC|PSR)\b[\d\.\+%\s]*', '', raw_desc, flags=re.IGNORECASE)
-
-            # Xóa đoạn định lượng sau dấu ngạch ngang ở cuối dòng description
-            raw_desc = re.sub(r'[-–—]\s*\d+[\d\.,]*\s*[A-Z]{2,5}\s*$', '', raw_desc, flags=re.IGNORECASE).strip()
+            
             raw_desc = re.sub(r'[-–—]\s*(?:USD|EUR|VND)?\s*\d+[\d\.,]*\s*$', '', raw_desc, flags=re.IGNORECASE).strip()
             raw_desc = re.sub(r'[-–—:;\,\.\s]+$', '', raw_desc).strip()
             raw_desc = re.sub(r'\s+[a-zA-Z]{1,2}$', '', raw_desc).strip()
@@ -581,15 +592,30 @@ def parse_description_fields(desc_text, weight_value_text=""):
     desc_before_meta = re.split(r'(?i)(IMPORTING COUNTRY|EXPORTING COUNTRY|Original CO)', text)[0].strip()
     desc_cleaned = re.sub(r'^\s*[\d,\.]+\s*CARTONS?\s*(?:[-–—:]\s*)?', '', desc_before_meta, flags=re.IGNORECASE).strip()
     
-    # --- [NEW] TRÍCH XUẤT BOX 7 QUANTITY VÀ UOM ---
+    # --- [NEW] TRÍCH XUẤT BOX 7 QUANTITY VÀ UOM (DÙNG TỪ KHÓA IMPORTING LÀM ĐIỂM NEO) ---
     qty_box7, uom_box7 = "", ""
-    box7_match = re.search(r'[-–—]\s*(\d+[\d\.,]*)\s*([A-Za-z]{2,5})\b', desc_cleaned)
+    box7_match = re.search(r'[-–—]\s*(\d+[\d\.,]*)\s*([A-Za-z]{2,8})\b', desc_cleaned)
     if box7_match:
         qty_box7 = box7_match.group(1).replace(',', '')
         uom_box7 = box7_match.group(2).upper()
-    # ----------------------------------------------
+    else:
+        # Lấy cụm Số lượng + Đơn vị đứng ngay trước dòng chứa từ khóa IMPORTING COUNTRY
+        box7_match_2 = re.search(r'(\d+[\d\.,]*)\s*([A-Za-z]{2,8})\s*(?:\n|\s)*IMPORTING\s+COUNTRY', text, re.IGNORECASE)
+        if box7_match_2:
+            qty_box7 = box7_match_2.group(1).replace(',', '')
+            uom_box7 = box7_match_2.group(2).upper()
+        else:
+            box7_match_3 = re.search(r'(?:\s|^)(\d+[\d\.,]*)\s*([A-Za-z]{2,8})\s*$', desc_cleaned)
+            if box7_match_3:
+                qty_box7 = box7_match_3.group(1).replace(',', '')
+                uom_box7 = box7_match_3.group(2).upper()
+                
+    # Dọn dẹp eng_desc: Chỉ xóa chính xác cụm quantity/uom vừa tìm được khỏi mô tả
+    eng_desc = desc_cleaned
+    if qty_box7 and uom_box7:
+        eng_desc = re.sub(r'[-–—]?\s*' + re.escape(qty_box7) + r'[\s\n]*' + re.escape(uom_box7) + r'\b', '', eng_desc, flags=re.IGNORECASE).strip()
+    # ---------------------------------------------------------------------------------
         
-    eng_desc = re.sub(r'(?:\s+[-–—:]\s+|\s+)([\d,\.]+)\s*[A-Za-z\s\.]*$', '', desc_cleaned).strip()
     eng_desc = re.sub(r'[-–—:,]\s*$', '', eng_desc).strip()
             
     import_hs = re.sub(r'\D', '', re.search(r'IMPORTING COUNTRY HS CODE\s*[:\-]?\s*([A-Za-z0-9\.]+)', text, re.IGNORECASE).group(1))[:8] if re.search(r'IMPORTING COUNTRY HS CODE\s*[:\-]?\s*([A-Za-z0-9\.]+)', text, re.IGNORECASE) else ""
@@ -712,7 +738,6 @@ def process_single_pdf(file_data):
                         invoice_number = invoice.replace(date_match.group(1), "").strip()
                     else: invoice_number = invoice
                 
-                # Hàm parse_description_fields giờ đã trả về qty_box7, uom_box7
                 carton, eng_desc, qty, uom, import_hs, export_hs, orig_co, issue_date, auth, qty_box7, uom_box7 = parse_description_fields(desc, weight_value_text)
                 
                 usd_match = re.search(r'USD\s*([\d,\.]+)', weight_value_text, re.IGNORECASE)
@@ -732,8 +757,8 @@ def process_single_pdf(file_data):
                     COLUMNS[4]: clean_text(eng_desc),
                     COLUMNS[5]: clean_text(qty), 
                     COLUMNS[6]: clean_text(uom), 
-                    COLUMNS[7]: clean_text(qty_box7), # NEW H
-                    COLUMNS[8]: clean_text(uom_box7), # NEW I
+                    COLUMNS[7]: clean_text(qty_box7),
+                    COLUMNS[8]: clean_text(uom_box7),
                     COLUMNS[9]: usd, 
                     COLUMNS[10]: clean_text(item["origin"]), 
                     COLUMNS[11]: import_hs, 
@@ -846,7 +871,6 @@ def main():
             st.markdown("**3. Xuất kết quả**")
             if st.session_state.extracted_data is not None:
                 df_result = pd.DataFrame(st.session_state.extracted_data, columns=COLUMNS)
-                # Đã cập nhật 2 cột Quantity mới vào hàm chuyển đổi numeric của Pandas
                 numeric_cols = ["Item Number", "Quantity - Box 9", "Quantity - Box 7", "USD", "IMPORTING COUNTRY HS CODE", "EXPORTING COUNTRY HS CODE", "CARTON"]
                 for col in numeric_cols:
                     if col in df_result.columns:
