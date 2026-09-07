@@ -29,7 +29,7 @@ pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
 # ==========================================
 COLUMNS = [
     "Form", "Reference No", "Original CO Reference Number", "Item Number",
-    "English description", "Quantity", "UOM", "USD", "Origin criteria (see Overleaf Notes)",
+    "English description", "Quantity - Box 9", "UOM - Box 9", "USD", "Origin criteria (see Overleaf Notes)",
     "IMPORTING COUNTRY HS CODE", "EXPORTING COUNTRY HS CODE", "Invoice Number",
     "Date of invoices", "CARTON", "Original CO Issuance Date", "Issuing Authority",
     "Date of certification", "Products consigned from (Exporter's business name, address, country)",
