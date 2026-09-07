@@ -29,7 +29,9 @@ pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
 # ==========================================
 COLUMNS = [
     "Form", "Reference No", "Original CO Reference Number", "Item Number",
-    "English description", "Quantity - Box 9", "UOM - Box 9", "USD", "Origin criteria (see Overleaf Notes)",
+    "English description", "Quantity - Box 9", "UOM - Box 9", 
+    "Quantity - Box 7", "UOM - Box 7", # <-- 2 CỘT MỚI ĐƯỢC CHÈN VÀO ĐÂY (H và I)
+    "USD", "Origin criteria (see Overleaf Notes)",
     "IMPORTING COUNTRY HS CODE", "EXPORTING COUNTRY HS CODE", "Invoice Number",
     "Date of invoices", "CARTON", "Original CO Issuance Date", "Issuing Authority",
     "Date of certification", "Products consigned from (Exporter's business name, address, country)",
@@ -285,14 +287,11 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
     logging.info(main_text)
     box_13_str = extract_box13_scanned(pdf.pages[-1])
     
-    # --- CẬP NHẬT TRÍCH XUẤT THIRD PARTY CHO FILE SCAN ---
     tp_match = re.search(r'(?i)(?:Third\s+Party\s+Invoicing\s+by|Third\s+Party|Third\s+Country)\s*[:;]?\s*(.*?)(?=\bTOTAL\b|\bPage\b|$)', main_text, re.DOTALL)
     third_party_val = clean_text(tp_match.group(1)) if tp_match else ""
     
-    # KIỂM TRA NẾU LÀ FORM AI -> GÁN GIÁ TRỊ CỐ ĐỊNH
     if form_type == "AI":
         third_party_val = "DESIPRO PTE LTD 230 STADIUM BOULEVARD 397799 SINGAPORE"
-    # -----------------------------------------------------
 
     matches = list(re.finditer(r'(?i)(?:N/M|N\s*/\s*M|N/W|M/N|N\.M)', main_text))
     
@@ -301,9 +300,10 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             COLUMNS[0]: form_type, COLUMNS[1]: reference_no, COLUMNS[2]: "", COLUMNS[3]: "",
             COLUMNS[4]: "[Lỗi OCR] Không tìm thấy dữ liệu Item.", COLUMNS[5]: "", COLUMNS[6]: "", 
             COLUMNS[7]: "", COLUMNS[8]: "", COLUMNS[9]: "", COLUMNS[10]: "", COLUMNS[11]: "", 
-            COLUMNS[12]: "", COLUMNS[13]: "", COLUMNS[14]: "", COLUMNS[15]: "", COLUMNS[16]: date_cert, 
-            COLUMNS[17]: exporter, COLUMNS[18]: consignee, COLUMNS[19]: transport, COLUMNS[20]: produced_in, 
-            COLUMNS[21]: exported_to, COLUMNS[22]: "", COLUMNS[23]: box_13_str, COLUMNS[24]: third_party_val
+            COLUMNS[12]: "", COLUMNS[13]: "", COLUMNS[14]: "", COLUMNS[15]: "", COLUMNS[16]: "",
+            COLUMNS[17]: "", COLUMNS[18]: date_cert, COLUMNS[19]: exporter, COLUMNS[20]: consignee, 
+            COLUMNS[21]: transport, COLUMNS[22]: produced_in, COLUMNS[23]: exported_to, 
+            COLUMNS[24]: "", COLUMNS[25]: box_13_str, COLUMNS[26]: third_party_val
         })
     else:
         for i in range(len(matches)):
@@ -312,9 +312,6 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             block = main_text[start:end]
             item_no = str(i + 1)
 
-            # =====================================================================
-            # 1. TIỀN XỬ LÝ LỖI OCR KINH ĐIỂN
-            # =====================================================================
             block_fixed = re.sub(r"\bS(?=\s+[A-Z]{2,5}\b)", "5", block)
             block_fixed = re.sub(r"(?<=\d)S(?=\s+[A-Z]{2,5}\b)", "5", block_fixed)
             block_fixed = re.sub(r"(?<=\s)S(?=\s+[\d\.\,\+])", "5", block_fixed)
@@ -369,9 +366,7 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             exp_m = re.search(r'(?i)EXPORTING\s+COUNTRY\s+HS\s+CODE\s*[:\-]?\s*(\d{8,10})', block_fixed)
             exp_hs = exp_m.group(1)[:8] if exp_m else ""
 
-            # =================================================================
-            # --- ORIGINAL CO REFERENCE NUMBER 
-            # =================================================================
+            # --- ORIGINAL CO REFERENCE NUMBER ---
             orig_match = re.search(r'(?is)CO\s+Reference\s+Number[\s:,\-]*\n*(.*?)(?=\n*Issuance|\n*Date|\n*Page|\n*TOTAL|$)', block_fixed)
             if orig_match:
                 orig_co_raw = orig_match.group(1).strip()
@@ -382,32 +377,24 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
                     
                     if len(co_parts) >= 9:
                         p4 = co_parts[6].upper()
-                        
                         if p4.endswith("4"):
-                            if p4.endswith("A4"):
-                                p4 = p4[:-1]
-                            else:
-                                p4 = p4[:-1] + "A"
+                            if p4.endswith("A4"): p4 = p4[:-1]
+                            else: p4 = p4[:-1] + "A"
                         elif len(p4) > 0 and not p4.endswith("A"):
                             p4 = (p4[:-1] + "A") if p4[-1].isalpha() else (p4 + "A")
-                            
                         co_parts[6] = p4
                         
                         p5_raw = "".join(co_parts[8:])
                         p5_clean = re.sub(r'\D.*$', '', p5_raw)[:8]
                         if not p5_clean:
                             p5_clean = p5_raw  
-                            
                         orig_co = "".join(co_parts[:8]) + p5_clean
 
             iss_m = re.search(r'(?i)Issuance\s+Date:\s*\n*(\d{1,2}-[A-Za-z]{3}-\d{4})', block_fixed)
             orig_date = iss_m.group(1).upper() if iss_m else ""
 
-            # =================================================================
-            # --- ORIGIN CRITERIA 
-            # =================================================================
+            # --- ORIGIN CRITERIA ---
             part1, part2 = "", ""
-            
             rvc_m = re.search(r'(RVC\s*[\d\.,]+\s*%?\s*\+?)', block_fixed, re.IGNORECASE)
             if rvc_m: 
                 part1 = re.sub(r'\s+', ' ', rvc_m.group(1)).upper().replace(',', '.')
@@ -428,12 +415,18 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
                     val = wo_m.group(1).upper().replace(' ', '')
                     origin = "WO" if val == "WOO" or val == "WO" else val
 
-            # =================================================================
             # --- DESCRIPTION ---
-            # =================================================================
             desc_zone = re.split(r'(?i)(?:IMPORTING\s+COUNTRY|Original\s+CO|TOTAL|Page)', block_fixed)[0]
             clean_lines = [l.strip() for l in desc_zone.split('\n') if l.strip() and not re.search(r'N/M|\bCARTONS?\b', l, re.I)]
             raw_desc = " ".join(clean_lines)
+
+            # --- [NEW] TRÍCH XUẤT BOX 7 QUANTITY VÀ UOM TỪ MÔ TẢ CHO FILE SCAN ---
+            qty_box7, uom_box7 = "", ""
+            box7_match = re.search(r'[-–—]\s*(\d+[\d\.,]*)\s*([A-Za-z]{2,5})\b', raw_desc)
+            if box7_match:
+                qty_box7 = box7_match.group(1).replace(',', '')
+                uom_box7 = box7_match.group(2).upper()
+            # ---------------------------------------------------------------------
 
             if usd: raw_desc = re.sub(r'(?i)USD\s*' + re.escape(usd), '', raw_desc)
             if date_inv: raw_desc = raw_desc.replace(date_inv, '')
@@ -442,6 +435,7 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
 
             raw_desc = re.sub(r'\b(RVC|W\s*O|WoO|PE|CTSH|CTH|CC|PSR)\b[\d\.\+%\s]*', '', raw_desc, flags=re.IGNORECASE)
 
+            # Xóa đoạn định lượng sau dấu ngạch ngang ở cuối dòng description
             raw_desc = re.sub(r'[-–—]\s*\d+[\d\.,]*\s*[A-Z]{2,5}\s*$', '', raw_desc, flags=re.IGNORECASE).strip()
             raw_desc = re.sub(r'[-–—]\s*(?:USD|EUR|VND)?\s*\d+[\d\.,]*\s*$', '', raw_desc, flags=re.IGNORECASE).strip()
             raw_desc = re.sub(r'[-–—:;\,\.\s]+$', '', raw_desc).strip()
@@ -452,13 +446,15 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             extracted_data.append({
                 COLUMNS[0]: form_type, COLUMNS[1]: reference_no, COLUMNS[2]: clean_text(orig_co),
                 COLUMNS[3]: item_no, COLUMNS[4]: desc, COLUMNS[5]: clean_text(qty),
-                COLUMNS[6]: clean_text(uom), COLUMNS[7]: usd, COLUMNS[8]: origin,
-                COLUMNS[9]: imp_hs, COLUMNS[10]: exp_hs, COLUMNS[11]: invoice,
-                COLUMNS[12]: date_inv, COLUMNS[13]: clean_text(carton), COLUMNS[14]: clean_text(orig_date),
-                COLUMNS[15]: "", COLUMNS[16]: date_cert, COLUMNS[17]: exporter,
-                COLUMNS[18]: consignee, COLUMNS[19]: transport, COLUMNS[20]: produced_in,
-                COLUMNS[21]: exported_to, COLUMNS[22]: "N/M", COLUMNS[23]: box_13_str,
-                COLUMNS[24]: third_party_val # ĐÃ CẬP NHẬT GÁN CỨNG CHO AI
+                COLUMNS[6]: clean_text(uom), 
+                COLUMNS[7]: clean_text(qty_box7), COLUMNS[8]: clean_text(uom_box7),
+                COLUMNS[9]: usd, COLUMNS[10]: origin,
+                COLUMNS[11]: imp_hs, COLUMNS[12]: exp_hs, COLUMNS[13]: invoice,
+                COLUMNS[14]: date_inv, COLUMNS[15]: clean_text(carton), COLUMNS[16]: clean_text(orig_date),
+                COLUMNS[17]: "", COLUMNS[18]: date_cert, COLUMNS[19]: exporter,
+                COLUMNS[20]: consignee, COLUMNS[21]: transport, COLUMNS[22]: produced_in,
+                COLUMNS[23]: exported_to, COLUMNS[24]: "N/M", COLUMNS[25]: box_13_str,
+                COLUMNS[26]: third_party_val
             })
             
     logging.info(f"\n" + "="*70)
@@ -584,6 +580,15 @@ def parse_description_fields(desc_text, weight_value_text=""):
 
     desc_before_meta = re.split(r'(?i)(IMPORTING COUNTRY|EXPORTING COUNTRY|Original CO)', text)[0].strip()
     desc_cleaned = re.sub(r'^\s*[\d,\.]+\s*CARTONS?\s*(?:[-–—:]\s*)?', '', desc_before_meta, flags=re.IGNORECASE).strip()
+    
+    # --- [NEW] TRÍCH XUẤT BOX 7 QUANTITY VÀ UOM ---
+    qty_box7, uom_box7 = "", ""
+    box7_match = re.search(r'[-–—]\s*(\d+[\d\.,]*)\s*([A-Za-z]{2,5})\b', desc_cleaned)
+    if box7_match:
+        qty_box7 = box7_match.group(1).replace(',', '')
+        uom_box7 = box7_match.group(2).upper()
+    # ----------------------------------------------
+        
     eng_desc = re.sub(r'(?:\s+[-–—:]\s+|\s+)([\d,\.]+)\s*[A-Za-z\s\.]*$', '', desc_cleaned).strip()
     eng_desc = re.sub(r'[-–—:,]\s*$', '', eng_desc).strip()
             
@@ -593,7 +598,7 @@ def parse_description_fields(desc_text, weight_value_text=""):
     issue_date = re.search(r'Issuance Date\s*:\s*(.*?)(?=Issuing Authority|TOTAL|$)', text, re.IGNORECASE).group(1).strip() if re.search(r'Issuance Date\s*:\s*(.*?)(?=Issuing Authority|TOTAL|$)', text, re.IGNORECASE) else ""
     auth = re.search(r'Issuing Authority\s*:\s*(.*?)(?=TOTAL|Page|$)', text, re.IGNORECASE).group(1).strip() if re.search(r'Issuing Authority\s*:\s*(.*?)(?=TOTAL|Page|$)', text, re.IGNORECASE) else ""
     
-    return carton, eng_desc, qty, uom, import_hs, export_hs, orig_co, issue_date, auth
+    return carton, eng_desc, qty, uom, import_hs, export_hs, orig_co, issue_date, auth, qty_box7, uom_box7
 
 def extract_table_items(pdf):
     items = []
@@ -679,7 +684,6 @@ def process_single_pdf(file_data):
             items, global_invoice, third_party_column_val = extract_table_items(pdf)
             box_13_str = "YES" if (global_info["third_party"] == "Yes" and global_info["movement_cert"] != "") else "No"
             
-            # KIỂM TRA NẾU LÀ FORM AI -> GÁN GIÁ TRỊ CỐ ĐỊNH CHO THIRD PARTY
             if global_info["form_type"] == "AI":
                 third_party_column_val = "DESIPRO PTE LTD 230 STADIUM BOULEVARD 397799 SINGAPORE"
 
@@ -708,7 +712,8 @@ def process_single_pdf(file_data):
                         invoice_number = invoice.replace(date_match.group(1), "").strip()
                     else: invoice_number = invoice
                 
-                carton, eng_desc, qty, uom, import_hs, export_hs, orig_co, issue_date, auth = parse_description_fields(desc, weight_value_text)
+                # Hàm parse_description_fields giờ đã trả về qty_box7, uom_box7
+                carton, eng_desc, qty, uom, import_hs, export_hs, orig_co, issue_date, auth, qty_box7, uom_box7 = parse_description_fields(desc, weight_value_text)
                 
                 usd_match = re.search(r'USD\s*([\d,\.]+)', weight_value_text, re.IGNORECASE)
                 usd = usd_match.group(1).strip() if usd_match else ""
@@ -720,17 +725,33 @@ def process_single_pdf(file_data):
                 if item_no_val.upper() == "CONTINUATION": item_no_val = ""
                 
                 extracted_data.append({
-                    COLUMNS[0]: global_info["form_type"], COLUMNS[1]: global_info["reference_no"],
-                    COLUMNS[2]: clean_text(orig_co), COLUMNS[3]: item_no_val, COLUMNS[4]: clean_text(eng_desc),
-                    COLUMNS[5]: clean_text(qty), COLUMNS[6]: clean_text(uom), COLUMNS[7]: usd,
-                    COLUMNS[8]: clean_text(item["origin"]), COLUMNS[9]: import_hs, COLUMNS[10]: export_hs,       
-                    COLUMNS[11]: invoice_number, COLUMNS[12]: invoice_date, COLUMNS[13]: clean_text(carton),
-                    COLUMNS[14]: format_to_dd_mm_yyyy(issue_date), COLUMNS[15]: clean_text(auth),
-                    COLUMNS[16]: global_info["date_of_cert"], COLUMNS[17]: global_info["exporter"],
-                    COLUMNS[18]: global_info["consignee"], COLUMNS[19]: global_info["transport"],
-                    COLUMNS[20]: global_info["produced_in"], COLUMNS[21]: global_info["exported_to"],
-                    COLUMNS[22]: clean_text(item["marks"]), COLUMNS[23]: box_13_str,
-                    COLUMNS[24]: third_party_column_val # ĐÃ CẬP NHẬT GÁN CỨNG CHO AI
+                    COLUMNS[0]: global_info["form_type"], 
+                    COLUMNS[1]: global_info["reference_no"],
+                    COLUMNS[2]: clean_text(orig_co), 
+                    COLUMNS[3]: item_no_val, 
+                    COLUMNS[4]: clean_text(eng_desc),
+                    COLUMNS[5]: clean_text(qty), 
+                    COLUMNS[6]: clean_text(uom), 
+                    COLUMNS[7]: clean_text(qty_box7), # NEW H
+                    COLUMNS[8]: clean_text(uom_box7), # NEW I
+                    COLUMNS[9]: usd, 
+                    COLUMNS[10]: clean_text(item["origin"]), 
+                    COLUMNS[11]: import_hs, 
+                    COLUMNS[12]: export_hs,       
+                    COLUMNS[13]: invoice_number, 
+                    COLUMNS[14]: invoice_date, 
+                    COLUMNS[15]: clean_text(carton),
+                    COLUMNS[16]: format_to_dd_mm_yyyy(issue_date), 
+                    COLUMNS[17]: clean_text(auth),
+                    COLUMNS[18]: global_info["date_of_cert"], 
+                    COLUMNS[19]: global_info["exporter"],
+                    COLUMNS[20]: global_info["consignee"], 
+                    COLUMNS[21]: global_info["transport"],
+                    COLUMNS[22]: global_info["produced_in"], 
+                    COLUMNS[23]: global_info["exported_to"],
+                    COLUMNS[24]: clean_text(item["marks"]), 
+                    COLUMNS[25]: box_13_str,
+                    COLUMNS[26]: third_party_column_val
                 })
     except Exception as e:
         return {"error": f"{file_name}: Lỗi trích xuất - {str(e)}", "data": [], "file_name": file_name}
@@ -825,7 +846,8 @@ def main():
             st.markdown("**3. Xuất kết quả**")
             if st.session_state.extracted_data is not None:
                 df_result = pd.DataFrame(st.session_state.extracted_data, columns=COLUMNS)
-                numeric_cols = ["Item Number", "Quantity", "USD", "IMPORTING COUNTRY HS CODE", "EXPORTING COUNTRY HS CODE", "CARTON"]
+                # Đã cập nhật 2 cột Quantity mới vào hàm chuyển đổi numeric của Pandas
+                numeric_cols = ["Item Number", "Quantity - Box 9", "Quantity - Box 7", "USD", "IMPORTING COUNTRY HS CODE", "EXPORTING COUNTRY HS CODE", "CARTON"]
                 for col in numeric_cols:
                     if col in df_result.columns:
                         df_result[col] = df_result[col].astype(str).str.replace(',', '')
