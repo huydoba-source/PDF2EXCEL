@@ -34,7 +34,8 @@ COLUMNS = [
     "Date of invoices", "CARTON", "Original CO Issuance Date", "Issuing Authority",
     "Date of certification", "Products consigned from (Exporter's business name, address, country)",
     "Products consigned to (Consignee's name, address, country)", "Means of transport and route (as far as known)",
-    "Produced in", "Exported to", "Marks and numbers on packages", "Box 13"
+    "Produced in", "Exported to", "Marks and numbers on packages", "Box 13", 
+    "Third party" # CỘT MỚI THÊM VÀO
 ]
 
 DECATHLON_BLUE = "#0082C3"
@@ -283,6 +284,11 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
 
     logging.info(main_text)
     box_13_str = extract_box13_scanned(pdf.pages[-1])
+    
+    # --- CẬP NHẬT TRÍCH XUẤT THIRD PARTY CHO FILE SCAN ---
+    tp_match = re.search(r'(?i)(?:Third\s+Party\s+Invoicing\s+by|Third\s+Party|Third\s+Country)\s*[:;]?\s*(.*?)(?=\bTOTAL\b|\bPage\b|$)', main_text, re.DOTALL)
+    third_party_val = clean_text(tp_match.group(1)) if tp_match else ""
+    # -----------------------------------------------------
 
     matches = list(re.finditer(r'(?i)(?:N/M|N\s*/\s*M|N/W|M/N|N\.M)', main_text))
     
@@ -293,7 +299,7 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             COLUMNS[7]: "", COLUMNS[8]: "", COLUMNS[9]: "", COLUMNS[10]: "", COLUMNS[11]: "", 
             COLUMNS[12]: "", COLUMNS[13]: "", COLUMNS[14]: "", COLUMNS[15]: "", COLUMNS[16]: date_cert, 
             COLUMNS[17]: exporter, COLUMNS[18]: consignee, COLUMNS[19]: transport, COLUMNS[20]: produced_in, 
-            COLUMNS[21]: exported_to, COLUMNS[22]: "", COLUMNS[23]: box_13_str
+            COLUMNS[21]: exported_to, COLUMNS[22]: "", COLUMNS[23]: box_13_str, COLUMNS[24]: third_party_val
         })
     else:
         for i in range(len(matches)):
@@ -303,7 +309,7 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             item_no = str(i + 1)
 
             # =====================================================================
-            # 1. TIỀN XỬ LÝ LỖI OCR KINH ĐIỂN (Đã fix lỗi Fixed-width Look-behind)
+            # 1. TIỀN XỬ LÝ LỖI OCR KINH ĐIỂN
             # =====================================================================
             block_fixed = re.sub(r"\bS(?=\s+[A-Z]{2,5}\b)", "5", block)
             block_fixed = re.sub(r"(?<=\d)S(?=\s+[A-Z]{2,5}\b)", "5", block_fixed)
@@ -394,16 +400,14 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             orig_date = iss_m.group(1).upper() if iss_m else ""
 
             # =================================================================
-            # --- ORIGIN CRITERIA (Đã fix Case Sensitivity và lỗi khoảng trắng RVC)
+            # --- ORIGIN CRITERIA 
             # =================================================================
             part1, part2 = "", ""
             
-            # Mở rộng regex để chịu lỗi khoảng trắng trước/sau dấu %
             rvc_m = re.search(r'(RVC\s*[\d\.,]+\s*%?\s*\+?)', block_fixed, re.IGNORECASE)
             if rvc_m: 
                 part1 = re.sub(r'\s+', ' ', rvc_m.group(1)).upper().replace(',', '.')
 
-            # Đảm bảo IGNORECASE cho các cụm CTSH, CTH...
             sub_m = re.search(r'\b(CTSH|CTH|CC)\b', block_fixed, re.IGNORECASE)
             if sub_m: 
                 part2 = sub_m.group(1).upper()
@@ -415,7 +419,6 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             elif part2: 
                 origin = part2
             else:
-                # Bắt bọc lót tất cả các tình huống WO, wo, WoO, W O, PE, PSR
                 wo_m = re.search(r'\b(W\s*O|WoO|PE|PSR)\b', block_fixed, re.IGNORECASE)
                 if wo_m: 
                     val = wo_m.group(1).upper().replace(' ', '')
@@ -433,7 +436,6 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             if qty and uom: 
                 raw_desc = re.sub(r'\b' + re.escape(qty) + r'\s+' + re.escape(uom) + r'\b', '', raw_desc, flags=re.IGNORECASE)
 
-            # Đảm bảo dọn sạch các tàn dư WoO/wo ra khỏi mô tả (Thêm IGNORECASE)
             raw_desc = re.sub(r'\b(RVC|W\s*O|WoO|PE|CTSH|CTH|CC|PSR)\b[\d\.\+%\s]*', '', raw_desc, flags=re.IGNORECASE)
 
             raw_desc = re.sub(r'[-–—]\s*\d+[\d\.,]*\s*[A-Z]{2,5}\s*$', '', raw_desc, flags=re.IGNORECASE).strip()
@@ -451,7 +453,8 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
                 COLUMNS[12]: date_inv, COLUMNS[13]: clean_text(carton), COLUMNS[14]: clean_text(orig_date),
                 COLUMNS[15]: "", COLUMNS[16]: date_cert, COLUMNS[17]: exporter,
                 COLUMNS[18]: consignee, COLUMNS[19]: transport, COLUMNS[20]: produced_in,
-                COLUMNS[21]: exported_to, COLUMNS[22]: "N/M", COLUMNS[23]: box_13_str
+                COLUMNS[21]: exported_to, COLUMNS[22]: "N/M", COLUMNS[23]: box_13_str,
+                COLUMNS[24]: third_party_val # THÊM GIÁ TRỊ VÀO CỘT THỨ 25
             })
             
     logging.info(f"\n" + "="*70)
@@ -612,7 +615,9 @@ def extract_table_items(pdf):
             row_text = " ".join([w['text'] for w in row_words])
             
             if "Item Number" in row_text or "Marks and" in row_text: continue
-            if re.search(r'(?i)(Third\s+Party|\bTOTAL\b)', row_text): in_footer_section = True
+            
+            # --- CẬP NHẬT: Nhận dạng thêm chữ Third Country của Form AI ---
+            if re.search(r'(?i)(Third\s+Party|Third\s+Country|\bTOTAL\b)', row_text): in_footer_section = True
 
             col_item_no = [w['text'] for w in row_words if 35 <= w['x0'] < 77]
             col_marks   = [w['text'] for w in row_words if 77 <= w['x0'] < 150]
@@ -649,8 +654,11 @@ def extract_table_items(pdf):
                     if "VN" in current_item["invoice"] and "/" in current_item["invoice"]: global_invoice = current_item["invoice"]
 
     if current_item: items.append(current_item)
-    third_party_text = re.split(r'(?i)TOTAL|USD|MYR|EUR', clean_text(third_party_text))[0].strip()
-    return items, global_invoice, third_party_text
+    
+    # --- CẬP NHẬT LÀM SẠCH CHUỖI THIRD PARTY ---
+    raw_tp = re.split(r'(?i)TOTAL|USD|MYR|EUR', clean_text(third_party_text))[0].strip()
+    clean_tp = re.sub(r'(?i)^(Third\s+Party\s+Invoicing\s+by\s*[:;]?|Third\s+Party\s*[:;]?|Third\s+Country\s*[:;]?)', '', raw_tp).strip()
+    return items, global_invoice, clean_tp
 
 def process_single_pdf(file_data):
     file_name = file_data["name"]
@@ -709,13 +717,14 @@ def process_single_pdf(file_data):
                     COLUMNS[0]: global_info["form_type"], COLUMNS[1]: global_info["reference_no"],
                     COLUMNS[2]: clean_text(orig_co), COLUMNS[3]: item_no_val, COLUMNS[4]: clean_text(eng_desc),
                     COLUMNS[5]: clean_text(qty), COLUMNS[6]: clean_text(uom), COLUMNS[7]: usd,
-                    COLUMNS[8]: clean_text(item["origin"]), COLUMNS[9]: import_hs, COLUMNS[10]: export_hs,      
+                    COLUMNS[8]: clean_text(item["origin"]), COLUMNS[9]: import_hs, COLUMNS[10]: export_hs,       
                     COLUMNS[11]: invoice_number, COLUMNS[12]: invoice_date, COLUMNS[13]: clean_text(carton),
                     COLUMNS[14]: format_to_dd_mm_yyyy(issue_date), COLUMNS[15]: clean_text(auth),
                     COLUMNS[16]: global_info["date_of_cert"], COLUMNS[17]: global_info["exporter"],
                     COLUMNS[18]: global_info["consignee"], COLUMNS[19]: global_info["transport"],
                     COLUMNS[20]: global_info["produced_in"], COLUMNS[21]: global_info["exported_to"],
-                    COLUMNS[22]: clean_text(item["marks"]), COLUMNS[23]: box_13_str
+                    COLUMNS[22]: clean_text(item["marks"]), COLUMNS[23]: box_13_str,
+                    COLUMNS[24]: third_party_column_val # THÊM GIÁ TRỊ VÀO CỘT MỚI
                 })
     except Exception as e:
         return {"error": f"{file_name}: Lỗi trích xuất - {str(e)}", "data": [], "file_name": file_name}
@@ -782,17 +791,14 @@ def main():
             if uploaded_files:
                 st.session_state.pdf_files = uploaded_files
                 
-                # --- ĐOẠN CODE CẬP NHẬT GIAO DIỆN MỚI ---
                 file_count = len(st.session_state.pdf_files)
                 st.markdown(f"<p style='color: #059669; font-weight: 600; margin-bottom: 0.5rem;'>✅ Đã tải lên: {file_count} file</p>", unsafe_allow_html=True)
-                # ----------------------------------------
                 
                 with st.expander("🛠️ Quản lý tệp (Bấm để xem)", expanded=True):
                     with st.container(height=200):
                         for f in st.session_state.pdf_files: st.markdown(f"📄 `{f.name}`")
             else: 
                 st.session_state.pdf_files = []
-                # Hiển thị số 0 khi không có file
                 st.markdown(f"<p style='color: #6B7280; font-weight: 600; margin-bottom: 0.5rem;'>📁 Đã tải lên: 0 file</p>", unsafe_allow_html=True)
 
         with col2:
