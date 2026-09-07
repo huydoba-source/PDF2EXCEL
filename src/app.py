@@ -35,7 +35,7 @@ COLUMNS = [
     "Date of certification", "Products consigned from (Exporter's business name, address, country)",
     "Products consigned to (Consignee's name, address, country)", "Means of transport and route (as far as known)",
     "Produced in", "Exported to", "Marks and numbers on packages", "Box 13", 
-    "Third party" # CỘT MỚI THÊM VÀO
+    "Third party"
 ]
 
 DECATHLON_BLUE = "#0082C3"
@@ -288,6 +288,10 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
     # --- CẬP NHẬT TRÍCH XUẤT THIRD PARTY CHO FILE SCAN ---
     tp_match = re.search(r'(?i)(?:Third\s+Party\s+Invoicing\s+by|Third\s+Party|Third\s+Country)\s*[:;]?\s*(.*?)(?=\bTOTAL\b|\bPage\b|$)', main_text, re.DOTALL)
     third_party_val = clean_text(tp_match.group(1)) if tp_match else ""
+    
+    # KIỂM TRA NẾU LÀ FORM AI -> GÁN GIÁ TRỊ CỐ ĐỊNH
+    if form_type == "AI":
+        third_party_val = "DESIPRO PTE LTD 230 STADIUM BOULEVARD 397799 SINGAPORE"
     # -----------------------------------------------------
 
     matches = list(re.finditer(r'(?i)(?:N/M|N\s*/\s*M|N/W|M/N|N\.M)', main_text))
@@ -454,7 +458,7 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
                 COLUMNS[15]: "", COLUMNS[16]: date_cert, COLUMNS[17]: exporter,
                 COLUMNS[18]: consignee, COLUMNS[19]: transport, COLUMNS[20]: produced_in,
                 COLUMNS[21]: exported_to, COLUMNS[22]: "N/M", COLUMNS[23]: box_13_str,
-                COLUMNS[24]: third_party_val # THÊM GIÁ TRỊ VÀO CỘT THỨ 25
+                COLUMNS[24]: third_party_val # ĐÃ CẬP NHẬT GÁN CỨNG CHO AI
             })
             
     logging.info(f"\n" + "="*70)
@@ -616,7 +620,6 @@ def extract_table_items(pdf):
             
             if "Item Number" in row_text or "Marks and" in row_text: continue
             
-            # --- CẬP NHẬT: Nhận dạng thêm chữ Third Country của Form AI ---
             if re.search(r'(?i)(Third\s+Party|Third\s+Country|\bTOTAL\b)', row_text): in_footer_section = True
 
             col_item_no = [w['text'] for w in row_words if 35 <= w['x0'] < 77]
@@ -655,7 +658,6 @@ def extract_table_items(pdf):
 
     if current_item: items.append(current_item)
     
-    # --- CẬP NHẬT LÀM SẠCH CHUỖI THIRD PARTY ---
     raw_tp = re.split(r'(?i)TOTAL|USD|MYR|EUR', clean_text(third_party_text))[0].strip()
     clean_tp = re.sub(r'(?i)^(Third\s+Party\s+Invoicing\s+by\s*[:;]?|Third\s+Party\s*[:;]?|Third\s+Country\s*[:;]?)', '', raw_tp).strip()
     return items, global_invoice, clean_tp
@@ -676,6 +678,10 @@ def process_single_pdf(file_data):
             global_info = extract_global_info(pdf.pages[0], pdf.pages[-1])
             items, global_invoice, third_party_column_val = extract_table_items(pdf)
             box_13_str = "YES" if (global_info["third_party"] == "Yes" and global_info["movement_cert"] != "") else "No"
+            
+            # KIỂM TRA NẾU LÀ FORM AI -> GÁN GIÁ TRỊ CỐ ĐỊNH CHO THIRD PARTY
+            if global_info["form_type"] == "AI":
+                third_party_column_val = "DESIPRO PTE LTD 230 STADIUM BOULEVARD 397799 SINGAPORE"
 
             final_items = []
             for item in items:
@@ -724,7 +730,7 @@ def process_single_pdf(file_data):
                     COLUMNS[18]: global_info["consignee"], COLUMNS[19]: global_info["transport"],
                     COLUMNS[20]: global_info["produced_in"], COLUMNS[21]: global_info["exported_to"],
                     COLUMNS[22]: clean_text(item["marks"]), COLUMNS[23]: box_13_str,
-                    COLUMNS[24]: third_party_column_val # THÊM GIÁ TRỊ VÀO CỘT MỚI
+                    COLUMNS[24]: third_party_column_val # ĐÃ CẬP NHẬT GÁN CỨNG CHO AI
                 })
     except Exception as e:
         return {"error": f"{file_name}: Lỗi trích xuất - {str(e)}", "data": [], "file_name": file_name}
