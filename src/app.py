@@ -492,7 +492,7 @@ def extract_global_info(page_first, page_last):
     try:
         bbox_form = (290, 0, page_first.width, 150)
         cropped_form_page = page_first.crop(bbox_form)
-        pil_image = cropped_form_page.to_image(resolution=200).original
+        pil_image = cropped_form_page.to_image(resolution=300).original
         ocr_text = pytesseract.image_to_string(pil_image)
         form_match = re.search(r'FORM\s*([A-Za-z0-9]+)', ocr_text, re.IGNORECASE)
         if form_match: form_type = form_match.group(1).strip().upper()
@@ -503,7 +503,7 @@ def extract_global_info(page_first, page_last):
     try:
         bbox_box13 = (0, 600, page_last.width, page_last.height)
         cropped_box13 = page_last.crop(bbox_box13)
-        img_box13 = cropped_box13.to_image(resolution=200).original
+        img_box13 = cropped_box13.to_image(resolution=300).original
         ocr_data = pytesseract.image_to_data(img_box13, output_type=Output.DICT)
         
         def check_status(keyword_pattern):
