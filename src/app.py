@@ -1,7 +1,29 @@
+import subprocess
+import os
+
+# Kiểm tra xem hệ thống đã cài đặt tesseract chưa, nếu chưa thì tiến hành cài đặt
+if not os.path.exists("/usr/bin/tesseract"):
+    try:
+        # 1. Cập nhật kho lưu trữ kèm cờ bỏ qua kiểm tra thời gian hết hạn (Valid-Until)
+        subprocess.run([
+            "apt-get", "update", 
+            "-o", "Acquire::Check-Valid-Until=false", 
+            "--allow-releaseinfo-change"
+        ], check=True)
+        
+        # 2. Cài đặt các gói hệ thống cần thiết
+        subprocess.run([
+            "apt-get", "install", "-y", 
+            "tesseract-ocr", 
+            "tesseract-ocr-eng", 
+            "libgl1-mesa-glx"
+        ], check=True)
+    except Exception as e:
+        print(f"Lưu ý: Không thể cài gói hệ thống thông qua Python: {e}")
+
 import gc
 import streamlit as st
 import pandas as pd
-import os
 import io
 import re
 import time
