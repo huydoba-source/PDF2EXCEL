@@ -1,7 +1,7 @@
-import os
 import gc
 import streamlit as st
 import pandas as pd
+import os
 import io
 import re
 import time
@@ -22,8 +22,7 @@ import logging
 logging.basicConfig(level=logging.INFO)
 
 # [LƯU Ý]: Nếu chạy trên máy tính Windows thì đổi thành r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
-
+pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 # ==========================================
 # 1. CẤU HÌNH CỘT DỮ LIỆU ĐẦU RA 
 # ==========================================
@@ -347,16 +346,21 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
                             usd = dec; break
 
             # --- INVOICE NUMBER ---
-            inv_m = re.search(r'\b([VY]N\d{6,8}\-\d)', block_fixed, re.IGNORECASE)
-            if inv_m:
-                invoice = inv_m.group(1).upper().replace('YN', 'VN')
-                if form_type == "AI": invoice += " IN"
+            inv_matches = re.findall(r'[VY]N\s*\d+(?:\s+\d+)*(?:\-\d+)?', block_fixed, re.IGNORECASE)
+            if not inv_matches:
+                inv_matches = re.findall(r'[VY]N[A-Z0-9\-]+', block_fixed, re.IGNORECASE)
+            
+            if inv_matches:
+                cleaned_invs = []
+                for m in inv_matches:
+                    cln = re.sub(r'\s+', '', m).upper().replace('YN', 'VN')
+                    if cln not in cleaned_invs:
+                        cleaned_invs.append(cln)
+                invoice = ",".join(cleaned_invs)
+                if form_type == "AI" and not invoice.endswith("IN"):
+                    invoice += " IN"
             else:
-                vn_m = re.search(r'([VY]N[A-Z0-9\-]+)', block_fixed, re.IGNORECASE)
-                if vn_m:
-                    invoice = vn_m.group(1).upper().replace('YN', 'VN')
-                    if form_type == "AI" and not invoice.endswith("IN"):
-                        invoice += " IN"
+                invoice = ""
 
             # --- HS CODE ---
             imp_m = re.search(r'(?i)IMPORTING\s+COUNTRY\s+HS\s+CODE\s*[:\-]?\s*(\d{8,10})', block_fixed)
@@ -418,14 +422,13 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             clean_lines = [l.strip() for l in desc_zone.split('\n') if l.strip() and not re.search(r'N/M|\bCARTONS?\b', l, re.I)]
             raw_desc = " ".join(clean_lines)
 
-            # --- [NEW] TRÍCH XUẤT BOX 7 QUANTITY VÀ UOM (DÙNG TỪ KHÓA IMPORTING LÀM ĐIỂM NEO) ---
+            # --- TRÍCH XUẤT BOX 7 QUANTITY VÀ UOM (DÙNG TỪ KHÓA IMPORTING LÀM ĐIỂM NEO) ---
             qty_box7, uom_box7 = "", ""
             box7_match = re.search(r'[-–—]\s*(\d+[\d\.,]*)\s*([A-Za-z]{2,8})\b', raw_desc)
             if box7_match:
                 qty_box7 = box7_match.group(1).replace(',', '')
                 uom_box7 = box7_match.group(2).upper()
             else:
-                # Tìm số lượng nằm sát ngay trước cụm từ IMPORTING COUNTRY
                 box7_match_2 = re.search(r'(\d+[\d\.,]*)\s*([A-Za-z]{2,8})\s*(?:\n|\s)*IMPORTING\s+COUNTRY', block_fixed, re.IGNORECASE)
                 if box7_match_2:
                     qty_box7 = box7_match_2.group(1).replace(',', '')
@@ -436,10 +439,8 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
                         qty_box7 = box7_match_3.group(1).replace(',', '')
                         uom_box7 = box7_match_3.group(2).upper()
 
-            # Xóa đoạn định lượng BOX 7 vừa tìm được khỏi mô tả
             if qty_box7 and uom_box7:
                 raw_desc = re.sub(r'[-–—]?\s*' + re.escape(qty_box7) + r'[\s\n]*' + re.escape(uom_box7) + r'\b', '', raw_desc, flags=re.IGNORECASE).strip()
-            # ----------------------------------------------------------------------------------
 
             if usd: raw_desc = re.sub(r'(?i)USD\s*' + re.escape(usd), '', raw_desc)
             if date_inv: raw_desc = raw_desc.replace(date_inv, '')
@@ -592,14 +593,13 @@ def parse_description_fields(desc_text, weight_value_text=""):
     desc_before_meta = re.split(r'(?i)(IMPORTING COUNTRY|EXPORTING COUNTRY|Original CO)', text)[0].strip()
     desc_cleaned = re.sub(r'^\s*[\d,\.]+\s*CARTONS?\s*(?:[-–—:]\s*)?', '', desc_before_meta, flags=re.IGNORECASE).strip()
     
-    # --- [NEW] TRÍCH XUẤT BOX 7 QUANTITY VÀ UOM (DÙNG TỪ KHÓA IMPORTING LÀM ĐIỂM NEO) ---
+    # --- TRÍCH XUẤT BOX 7 QUANTITY VÀ UOM ---
     qty_box7, uom_box7 = "", ""
     box7_match = re.search(r'[-–—]\s*(\d+[\d\.,]*)\s*([A-Za-z]{2,8})\b', desc_cleaned)
     if box7_match:
         qty_box7 = box7_match.group(1).replace(',', '')
         uom_box7 = box7_match.group(2).upper()
     else:
-        # Lấy cụm Số lượng + Đơn vị đứng ngay trước dòng chứa từ khóa IMPORTING COUNTRY
         box7_match_2 = re.search(r'(\d+[\d\.,]*)\s*([A-Za-z]{2,8})\s*(?:\n|\s)*IMPORTING\s+COUNTRY', text, re.IGNORECASE)
         if box7_match_2:
             qty_box7 = box7_match_2.group(1).replace(',', '')
@@ -610,11 +610,10 @@ def parse_description_fields(desc_text, weight_value_text=""):
                 qty_box7 = box7_match_3.group(1).replace(',', '')
                 uom_box7 = box7_match_3.group(2).upper()
                 
-    # Dọn dẹp eng_desc: Chỉ xóa chính xác cụm quantity/uom vừa tìm được khỏi mô tả
     eng_desc = desc_cleaned
     if qty_box7 and uom_box7:
         eng_desc = re.sub(r'[-–—]?\s*' + re.escape(qty_box7) + r'[\s\n]*' + re.escape(uom_box7) + r'\b', '', eng_desc, flags=re.IGNORECASE).strip()
-    # ---------------------------------------------------------------------------------
+    # ----------------------------------------------
         
     eng_desc = re.sub(r'[-–—:,]\s*$', '', eng_desc).strip()
             
@@ -735,8 +734,22 @@ def process_single_pdf(file_data):
                     date_match = re.search(r'(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{4})', invoice)
                     if date_match:
                         invoice_date = format_to_dd_mm_yyyy(date_match.group(1))
-                        invoice_number = invoice.replace(date_match.group(1), "").strip()
-                    else: invoice_number = invoice
+                        invoice = invoice.replace(date_match.group(1), "")
+                    
+                    # --- XỬ LÝ NHIỀU INVOICE, BỎ KHOẢNG TRẮNG BỊ LỖI DO OCR ---
+                    inv_matches = re.findall(r'[VY]N\s*\d+(?:\s+\d+)*(?:\-\d+)?', invoice, re.IGNORECASE)
+                    if not inv_matches:
+                        inv_matches = re.findall(r'[VY]N[A-Z0-9\-]+', invoice, re.IGNORECASE)
+                        
+                    if inv_matches:
+                        cleaned_invs = []
+                        for m in inv_matches:
+                            cln = re.sub(r'\s+', '', m).upper().replace('YN', 'VN')
+                            if cln not in cleaned_invs:
+                                cleaned_invs.append(cln)
+                        invoice_number = ",".join(cleaned_invs)
+                    else:
+                        invoice_number = re.sub(r'\s+', '', invoice).strip(',;-')
                 
                 carton, eng_desc, qty, uom, import_hs, export_hs, orig_co, issue_date, auth, qty_box7, uom_box7 = parse_description_fields(desc, weight_value_text)
                 
