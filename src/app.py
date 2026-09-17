@@ -9,6 +9,9 @@ import requests
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+import gspread
+import uuid
+from datetime import datetime
 
 # --- THƯ VIỆN BỔ SUNG CHO OCR ---
 import pdfplumber
@@ -43,25 +46,39 @@ DECATHLON_BLUE = "#0082C3"
 DECATHLON_DARK = "#1F2937"
 BG_LIGHT = "#F9FAFB"
 
-def send_email_notification():
-    SENDER_EMAIL = "dobahuy7@gmail.com" 
-    SENDER_PASSWORD = "kwyv yjud qvhy ehiq" 
-    RECEIVER_EMAIL = "huy.doba@decathlon.com" 
-    if "nhap_gmail_ao" in SENDER_EMAIL: return
+def get_gspread_client():
+    # Đọc credentials từ st.secrets khi deploy trên Streamlit Cloud
+    # Hoặc nếu chạy local, Streamlit tự đọc từ .streamlit/secrets.toml
+    if "gcp_service_account" in st.secrets:
+        credentials = dict(st.secrets["gcp_service_account"])
+        return gspread.service_account_from_dict(credentials)
+    else:
+        # Fallback cho trường hợp bạn test local mà vẫn để file json (nhớ gitignore nó)
+        return gspread.service_account(filename="credential.json")
+
+def record_access(session_id):
     try:
-        msg = MIMEMultipart()
-        msg['From'] = f"Hệ thống Form E/D <{SENDER_EMAIL}>"
-        msg['To'] = RECEIVER_EMAIL
-        msg['Subject'] = "🚨 Thông báo: Có người truy cập Web Form E/D"
-        body = f"Chào Huy,\n\nVừa có một người dùng mới truy cập vào ứng dụng trích xuất PDF lúc {time.strftime('%Y-%m-%d %H:%M:%S')}."
-        msg.attach(MIMEText(body, 'plain'))
-        server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls()
-        server.login(SENDER_EMAIL, SENDER_PASSWORD)
-        server.send_message(msg)
-        server.quit()
+        gc_client = get_gspread_client()
+        sh = gc_client.open(SHEET_NAME)
+        worksheet = sh.worksheet("Access Record")
+        
+        # Ghi nhận Session ID và Thời gian đăng nhập
+        login_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        worksheet.append_row([session_id, login_time])
     except Exception as e:
-        print(f"[!] Lỗi khi gửi email SMTP: {e}")
+        print(f"[!] Lỗi ghi nhận Access Record: {e}")
+
+def record_file_processing(session_id, file_count):
+    try:
+        gc_client = get_gspread_client()
+        sh = gc_client.open(SHEET_NAME)
+        worksheet = sh.worksheet("File Record")
+        
+        # Ghi nhận Session ID, Thời gian bấm nút và Số lượng file
+        action_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        worksheet.append_row([session_id, action_time, file_count])
+    except Exception as e:
+        print(f"[!] Lỗi ghi nhận File Record: {e}")
 
 def format_to_dd_mm_yyyy(date_str):
     if not date_str: return ""
@@ -799,6 +816,10 @@ def process_single_pdf(file_data):
 # 4. GIAO DIỆN STREAMLIT
 # ==========================================
 def init_session_state():
+    if "session_id" not in st.session_state: 
+        st.session_state.session_id = str(uuid.uuid4()) # Tạo ID phiên làm việc ngẫu nhiên
+    if "has_recorded_access" not in st.session_state: 
+        st.session_state.has_recorded_access = False
     if "pdf_files" not in st.session_state: st.session_state.pdf_files = []
     if "is_processing" not in st.session_state: st.session_state.is_processing = False
     if "extracted_data" not in st.session_state: st.session_state.extracted_data = None
@@ -814,9 +835,10 @@ def main():
     st.set_page_config(page_title="Form E Extractor", layout="wide", page_icon="📑")
     init_session_state()
     
-    if "has_sent_email" not in st.session_state:
-        send_email_notification()
-        st.session_state.has_sent_email = True
+    # Ghi nhận ngay khi truy cập web lần đầu trong phiên
+    if not st.session_state.has_recorded_access:
+        record_access(st.session_state.session_id)
+        st.session_state.has_recorded_access = True
     
     st.markdown(f"""
         <style>
@@ -872,6 +894,7 @@ def main():
             if has_files:
                 if not st.session_state.is_processing:
                     if st.button("🚀 BẮT ĐẦU TRÍCH XUẤT", type="primary"):
+                        record_file_processing(st.session_state.session_id, len(st.session_state.pdf_files))
                         st.session_state.is_processing = True
                         reset_data_state()
                         st.rerun()
