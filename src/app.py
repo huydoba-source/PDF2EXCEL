@@ -46,6 +46,8 @@ DECATHLON_BLUE = "#0082C3"
 DECATHLON_DARK = "#1F2937"
 BG_LIGHT = "#F9FAFB"
 
+SHEET_NAME = "CO_Extract - Record"
+
 def get_gspread_client():
     # Đọc credentials từ st.secrets khi deploy trên Streamlit Cloud
     # Hoặc nếu chạy local, Streamlit tự đọc từ .streamlit/secrets.toml
