@@ -11,7 +11,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import gspread
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # --- THƯ VIỆN BỔ SUNG CHO OCR ---
 import pdfplumber
@@ -64,8 +64,10 @@ def record_access(session_id):
         sh = gc_client.open(SHEET_NAME)
         worksheet = sh.worksheet("Access Record")
         
-        # Ghi nhận Session ID và Thời gian đăng nhập
-        login_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Lấy giờ server (UTC) cộng thêm 7 tiếng để ra giờ Việt Nam (GMT+7)
+        vietnam_time = datetime.now() + timedelta(hours=7)
+        login_time = vietnam_time.strftime("%Y-%m-%d %H:%M:%S")
+        
         worksheet.append_row([session_id, login_time])
     except Exception as e:
         print(f"[!] Lỗi ghi nhận Access Record: {e}")
@@ -76,8 +78,10 @@ def record_file_processing(session_id, file_count):
         sh = gc_client.open(SHEET_NAME)
         worksheet = sh.worksheet("File Record")
         
-        # Ghi nhận Session ID, Thời gian bấm nút và Số lượng file
-        action_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Lấy giờ server (UTC) cộng thêm 7 tiếng để ra giờ Việt Nam (GMT+7)
+        vietnam_time = datetime.now() + timedelta(hours=7)
+        action_time = vietnam_time.strftime("%Y-%m-%d %H:%M:%S")
+        
         worksheet.append_row([session_id, action_time, file_count])
     except Exception as e:
         print(f"[!] Lỗi ghi nhận File Record: {e}")
