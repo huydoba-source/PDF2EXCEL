@@ -7,10 +7,10 @@ import re
 import time
 import requests  
 import smtplib
+import uuid
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-import gspread
-import uuid
+import numpy as np
 from datetime import datetime, timedelta
 
 # --- THƯ VIỆN BỔ SUNG CHO OCR ---
@@ -25,7 +25,7 @@ import logging
 logging.basicConfig(level=logging.INFO)
 
 # [LƯU Ý]: Nếu chạy trên máy tính Windows thì đổi thành r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
+pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 # ==========================================
 # 1. CẤU HÌNH CỘT DỮ LIỆU ĐẦU RA 
 # ==========================================
@@ -220,6 +220,199 @@ def extract_box13_scanned(page):
 # ==========================================
 # 2. XỬ LÝ FILE SCAN BẰNG FITZ (PyMuPDF) + TESSERACT THEO TỌA ĐỘ
 # ==========================================
+def remove_vertical_table_lines(pil_img):
+    """
+    [Tầng 2 - Computer Vision]: Xóa đường kẻ dọc của bảng C/O đè lên chữ 'IN' hoặc ',VN'
+    mà không làm đứt nét ngang/chéo của chữ cái.
+    """
+    gray = np.array(pil_img.convert("L"))
+    dark_mask = (gray < 200).astype(np.int32)
+    
+    # Cửa sổ trượt dọc 130px (~1cm ở 300 DPI): Đường kẻ dọc liên tục > 80%, chữ cái luôn có khoảng trắng dòng
+    kernel_h = 65
+    padded_v = np.pad(dark_mask, ((kernel_h, kernel_h), (0, 0)), mode='constant')
+    cumsum_v = np.cumsum(padded_v, axis=0)
+    moving_sum_v = cumsum_v[2 * kernel_h:, :] - cumsum_v[:-2 * kernel_h, :]
+    is_vline = moving_sum_v >= int(2 * kernel_h * 0.8)
+    
+    # Kiểm tra độ dày ngang (chỉ xóa vạch kẻ mảnh <= 5px, giữ lại nét chữ cái giao nhau với vạch kẻ)
+    padded_h = np.pad(dark_mask, ((0, 0), (4, 4)), mode='constant')
+    cumsum_h = np.cumsum(padded_h, axis=1)
+    h_sum = cumsum_h[:, 8:] - cumsum_h[:, :-8]
+    
+    thin_vline = is_vline & (h_sum <= 5)
+    erase_mask = thin_vline.copy()
+    erase_mask[:, 1:] |= thin_vline[:, :-1]
+    erase_mask[:, :-1] |= thin_vline[:, 1:]
+    
+    cleaned = gray.copy()
+    cleaned[erase_mask] = 255
+    return Image.fromarray(cleaned).convert("RGB")
+
+
+def parse_col10_invoice_block(col10_text, form_type=""):
+    """
+    [Tầng 3 - NLP Parser trên vùng Cột 10 đã cô lập]:
+    Xử lý chính xác 1 hoặc nhiều Invoice (kể cả bị ngắt dòng như VN26000174,VN / 26000175)
+    và chỉ thêm ' IN' khi ngay sau số hóa đơn trên cùng dòng có hậu tố chữ (IN, LN, 1N, |N...).
+    """
+    if not col10_text:
+        return "", ""
+        
+    # 1. Trích xuất Date of Invoice (DD/MM/YYYY)
+    date_inv = ""
+    d_match = re.search(r'\b(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{4})\b', col10_text)
+    if d_match:
+        date_inv = d_match.group(1)
+        col10_text = col10_text.replace(date_inv, '')
+
+    cleaned_invs = []
+    has_letter_suffix = False
+
+    # 2. Duyệt từng dòng trong Cột 10
+    for line in col10_text.split('\n'):
+        line_clean = line.strip()
+        if not line_clean:
+            continue
+        # Bỏ qua dòng tiêu đề cột hoặc chữ từ Box 12 nếu vô tình chạm biên
+        if re.search(r'(?i)\b(Number|date|invoices?|certified|basis|control|carried|out)\b', line_clean):
+            continue
+
+        # [MỚI] Nếu chữ IN/LN bị rớt xuống thành 1 dòng riêng biệt (như Item 8 của file 010237)
+        if re.match(r'^[\s\|\!\[\]\/]*(?:[I1L\|\!\[\]\/JT]N|IN|LN)[\s\.\,\|\!\]]*$', line_clean, re.IGNORECASE):
+            has_letter_suffix = True
+            continue
+
+        # Bắt mã số hóa đơn: Dùng (?<![0-9]) thay vì \b để bắt được cả "VN26000174" lẫn dòng rớt "26000175"
+        pattern = r'(?<![0-9])(?:[VY]N[ \t]*)?(2[4-9]\d{6}(?:\-\d+)?)(?![0-9])([ \t]*[^\n\r,;]*)?'
+        for m in re.finditer(pattern, line_clean, re.IGNORECASE):
+            num_part = m.group(1)
+            rest_segment = (m.group(2) or "").strip()
+            inv_code = "VN" + re.sub(r'\s+', '', num_part)
+            if inv_code not in cleaned_invs:
+                cleaned_invs.append(inv_code)
+
+            # Kiểm tra hậu tố chữ ngay phía sau số hóa đơn trên cùng dòng (VD: "IN", "LN", "1N", "|N", "[N")
+            if rest_segment:
+                s = re.sub(r'^[\s\.\,\;\:\-\_]+', '', rest_segment)
+                # Nếu bắt đầu bằng V hoặc Y (như ",VN") thì đó là tiền tố của hóa đơn thứ 2, KHÔNG phải hậu tố IN
+                if s and not re.match(r'^[VYvy]', s):
+                    tok_m = re.match(r'^([A-Za-z0-9\|!\[\]\/]{1,3})(?=\s|$|[\,\.\;\:\|\!\]])', s)
+                    if tok_m:
+                        tok = tok_m.group(1).upper()
+                        if re.match(r'^(?:[I1L\|\!\[\]\/JT][NMHUI1L\|]{1,2}|[A-Z1\|!\[\]\/]{1,2}N)$', tok):
+                            has_letter_suffix = True
+
+    # Fallback nếu mã hóa đơn có định dạng số khác
+    if not cleaned_invs:
+        fallback_matches = re.findall(r'[VY]N\s*([0-9]+(?:\-[0-9]+)?)', col10_text, re.IGNORECASE)
+        for fb in fallback_matches:
+            inv_code = "VN" + re.sub(r'\s+', '', fb)
+            if inv_code not in cleaned_invs:
+                cleaned_invs.append(inv_code)
+
+    if cleaned_invs:
+        invoice_str = ",".join(cleaned_invs)
+        if form_type == "AI" and has_letter_suffix:
+            invoice_str += " IN"
+    else:
+        invoice_str = ""
+
+    return invoice_str, date_inv
+
+
+def extract_page_items_and_col10(page, mat, tess_config, form_type):
+    """
+    Trích xuất đồng thời văn bản Cột 5-9 và ghép cặp tọa độ Y với Cột 10 trên từng trang PDF Scan.
+    Giới hạn đáy Cột 10 ở 575 pt để cắt bỏ hoàn toàn chữ 'ed out,' của Box 12.
+    """
+    y1 = 300
+    y2 = page.rect.height - 180
+    if y2 <= y1:
+        return "", []
+
+    # 1. Cắt vùng Cột 5 -> Cột 9 (x từ 0 đến 488 pt)
+    left_rect = fitz.Rect(0, y1, 488, y2)
+    pix_left = page.get_pixmap(matrix=mat, clip=left_rect)
+    img_left = Image.frombytes("RGB", [pix_left.width, pix_left.height], pix_left.samples) if not pix_left.alpha else Image.frombytes("RGBA", [pix_left.width, pix_left.height], pix_left.samples).convert("RGB")
+    img_left_clean = remove_vertical_table_lines(img_left)
+    
+    page_main_text = pytesseract.image_to_string(img_left_clean, config=tess_config)
+    left_data = pytesseract.image_to_data(img_left_clean, output_type=Output.DICT, config=tess_config)
+    
+    nm_y_positions = []
+    for idx, word in enumerate(left_data['text']):
+        w_clean = word.strip()
+        if re.search(r'(?i)^(?:N/M|N/W|M/N|N\.M)$', w_clean):
+            nm_y_positions.append(left_data['top'][idx])
+
+    # 2. Cắt riêng vùng Cột 10: Giới hạn đáy ở 575 pt (trên đường kẻ đáy bảng 580 pt) để KHÔNG dính Box 12 ("ed out,")
+    y2_col10 = min(575, y2)
+    col10_rect = fitz.Rect(485, y1, min(570, page.rect.width), y2_col10)
+    pix_col10 = page.get_pixmap(matrix=mat, clip=col10_rect)
+    img_col10 = Image.frombytes("RGB", [pix_col10.width, pix_col10.height], pix_col10.samples) if not pix_col10.alpha else Image.frombytes("RGBA", [pix_col10.width, pix_col10.height], pix_col10.samples).convert("RGB")
+    img_col10_clean = remove_vertical_table_lines(img_col10)
+    
+    col10_data = pytesseract.image_to_data(img_col10_clean, output_type=Output.DICT, config=r'--oem 3 --psm 6')
+    
+    # Gom các từ trong Cột 10 theo tọa độ dòng Y
+    col10_lines = []
+    line_groups = {}
+    for idx, word in enumerate(col10_data['text']):
+        w_clean = word.strip()
+        if not w_clean:
+            continue
+        y_top = col10_data['top'][idx]
+        x_left = col10_data['left'][idx]
+        matched_y = None
+        for ky in line_groups:
+            if abs(y_top - ky) <= 15:
+                matched_y = ky
+                break
+        if matched_y is None:
+            line_groups[y_top] = [(x_left, w_clean)]
+        else:
+            line_groups[matched_y].append((x_left, w_clean))
+
+    for ky in sorted(line_groups.keys()):
+        sorted_words = [w for _, w in sorted(line_groups[ky], key=lambda item: item[0])]
+        col10_lines.append((ky, " ".join(sorted_words)))
+
+    # 3. Phân cụm các dòng Cột 10 về từng Item dựa trên tọa độ Y của "N/M"
+    nm_regex_matches = list(re.finditer(r'(?i)(?:N/M|N\s*/\s*M|N/W|M/N|N\.M)', page_main_text))
+    num_items_on_page = len(nm_regex_matches)
+    
+    page_col10_results = []
+    if num_items_on_page > 0:
+        # Lọc bỏ phần tiêu đề "10. Number and date of invoices" (nằm ở y_pos <= 360 px) và phần dưới đáy bảng (> 1140 px)
+        valid_col10_lines = [(y_pos, txt) for y_pos, txt in col10_lines if 360 < y_pos <= 1140]
+        
+        if num_items_on_page == 1:
+            inv_str, dt_str = parse_col10_invoice_block("\n".join([txt for _, txt in valid_col10_lines]), form_type)
+            page_col10_results.append((inv_str, dt_str))
+        else:
+            if len(nm_y_positions) == num_items_on_page:
+                anchors = sorted(nm_y_positions)
+            else:
+                vn_ys = [y_pos for y_pos, txt in valid_col10_lines if re.search(r'[VY]N|2[4-9]\d{6}', txt, re.I)]
+                anchors = vn_ys[:num_items_on_page] if len(vn_ys) >= num_items_on_page else [420 + k * 350 for k in range(num_items_on_page)]
+
+            item_buckets = [[] for _ in range(num_items_on_page)]
+            for y_pos, txt in valid_col10_lines:
+                assigned_idx = 0
+                for idx_a in range(num_items_on_page):
+                    if y_pos >= anchors[idx_a] - 60:
+                        assigned_idx = idx_a
+                item_buckets[assigned_idx].append(txt)
+
+            for bucket in item_buckets:
+                inv_str, dt_str = parse_col10_invoice_block("\n".join(bucket), form_type)
+                page_col10_results.append((inv_str, dt_str))
+
+    return page_main_text, page_col10_results
+
+
+
 def process_scanned_pdf(pdf, file_bytes, file_name):
     extracted_data = []
     
@@ -234,7 +427,7 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
         tess_config = r'--oem 3 --psm 6'
 
         # ---------------------------------------------------------
-        # GLOBAL INFO
+        # GLOBAL INFO (ƯU TIÊN LẤY FORM TỪ TÊN FILE REFERENCE NO)
         # ---------------------------------------------------------
         top_rect = fitz.Rect(0, 0, page_first.rect.width, 300)
         pix_top = page_first.get_pixmap(matrix=mat, clip=top_rect)
@@ -243,10 +436,36 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
         top_flat = re.sub(r'[\n\|]', ' ', top_text)
 
         form_type = ""
-        form_match = re.search(r'(?i)FORM\s*([A-Za-z0-9]+)', top_flat)
-        if form_match:
-            form_type = form_match.group(1).upper()
-            if form_type in ["AL", "A1", "A|", "A L", "A I"]: form_type = "AI"
+        # 1. Ưu tiên trích xuất trực tiếp từ tên file (VD: KL-2026-AI-21-010237 -> AI, KL-2026-E-13-70037 -> E, KL-202609-CCF-... -> D)
+        fn_match = re.search(r'(?i)\bKL-\d{4,6}-([A-Za-z0-9]+)-', reference_no)
+        if fn_match:
+            raw_ft = fn_match.group(1).upper()
+            if raw_ft in ["AI", "AL", "A1"]:
+                form_type = "AI"
+            elif raw_ft in ["CCF", "D"]:
+                form_type = "D"
+            else:
+                form_type = raw_ft
+        else:
+            fn_fallback = re.search(r'(?i)[\-_](AI|A1|AL|CCF|E|D|AK|AJ|AANZ)[\-_]', reference_no)
+            if fn_fallback:
+                raw_ft = fn_fallback.group(1).upper()
+                if raw_ft in ["AI", "AL", "A1"]:
+                    form_type = "AI"
+                elif raw_ft == "CCF":
+                    form_type = "D"
+                else:
+                    form_type = raw_ft
+
+        # 2. Fallback bằng OCR trên trang 1 nếu tên file bị đặt khác chuẩn
+        if not form_type:
+            form_match = re.search(r'(?i)F[O0]R[MN]\s*([A-Za-z0-9\|]+)', top_flat)
+            if form_match:
+                form_type = form_match.group(1).upper()
+                if form_type in ["AL", "A1", "A|", "A L", "A I"]:
+                    form_type = "AI"
+            elif re.search(r'(?i)ASEAN\s*[\-\s]\s*INDIA', top_flat):
+                form_type = "AI"
 
         produced_in, exported_to = "", ""
         if form_type == "AI":
@@ -295,16 +514,15 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             date_cert = cert_match.group(1).strip()
 
         # ---------------------------------------------------------
-        # MAIN ITEMS
+        # MAIN ITEMS + SPATIAL COLUMN 10 EXTRACTION
         # ---------------------------------------------------------
         main_text = ""
+        all_col10_items = []
         for page in doc:
-            x1 = 0; y1 = 300; x2 = page.rect.width; y2 = page.rect.height - 180
-            if y2 <= y1: continue
-            main_rect = fitz.Rect(x1, y1, x2, y2)
-            pix_main = page.get_pixmap(matrix=mat, clip=main_rect)
-            img_main = Image.frombytes("RGB", [pix_main.width, pix_main.height], pix_main.samples) if not pix_main.alpha else Image.frombytes("RGBA", [pix_main.width, pix_main.height], pix_main.samples).convert("RGB")
-            main_text += "\n" + pytesseract.image_to_string(img_main, config=tess_config)
+            page_text, page_col10 = extract_page_items_and_col10(page, mat, tess_config, form_type)
+            if page_text:
+                main_text += "\n" + page_text
+                all_col10_items.extend(page_col10)
 
     logging.info(main_text)
     box_13_str = extract_box13_scanned(pdf.pages[-1])
@@ -333,7 +551,7 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             block = main_text[start:end]
             item_no = str(i + 1)
 
-            block_fixed = re.sub(r"\bS(?=\s+[A-Z]{2,5}\b)", "5", block)
+            block_fixed = re.sub(r"(?<![A-Za-z'’])\bS(?=\s+[A-Z]{2,5}\b)", "5", block)
             block_fixed = re.sub(r"(?<=\d)S(?=\s+[A-Z]{2,5}\b)", "5", block_fixed)
             block_fixed = re.sub(r"(?<=\s)S(?=\s+[\d\.\,\+])", "5", block_fixed)
 
@@ -344,9 +562,18 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             c_match = re.search(r'(\d+)[A-Za-z]*\s*CARTON', block_fixed, re.IGNORECASE)
             carton = c_match.group(1) if c_match else ""
 
-            # --- DATE OF INVOICE ---
-            d_match = re.search(r'\b(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{4})\b', block_fixed)
-            if d_match: date_inv = d_match.group(1)
+            # --- INVOICE NUMBER & DATE OF INVOICE (LẤY TỪ SPATIAL CỘT 10) ---
+            if i < len(all_col10_items):
+                invoice, date_inv = all_col10_items[i]
+
+            # Fallback dự phòng nếu ngày hoặc mã hóa đơn chưa bắt được từ Cột 10
+            if not date_inv:
+                d_match = re.search(r'\b(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{4})\b', block_fixed)
+                if d_match:
+                    date_inv = d_match.group(1)
+
+            if not invoice:
+                invoice, _ = parse_col10_invoice_block(block_fixed, form_type)
 
             # --- QUANTITY & UOM ---
             qu_match = re.search(r'\b(\d+[\d\.,]*)\s+([A-Z]{2,5})\b', block_fixed)
@@ -368,23 +595,6 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
                         if dec != qty:
                             usd = dec; break
 
-            # --- INVOICE NUMBER ---
-            inv_matches = re.findall(r'[VY]N\s*\d+(?:\s+\d+)*(?:\-\d+)?', block_fixed, re.IGNORECASE)
-            if not inv_matches:
-                inv_matches = re.findall(r'[VY]N[A-Z0-9\-]+', block_fixed, re.IGNORECASE)
-            
-            if inv_matches:
-                cleaned_invs = []
-                for m in inv_matches:
-                    cln = re.sub(r'\s+', '', m).upper().replace('YN', 'VN')
-                    if cln not in cleaned_invs:
-                        cleaned_invs.append(cln)
-                invoice = ",".join(cleaned_invs)
-                if form_type == "AI" and not invoice.endswith("IN"):
-                    invoice += " IN"
-            else:
-                invoice = ""
-
             # --- HS CODE ---
             imp_m = re.search(r'(?i)IMPORTING\s+COUNTRY\s+HS\s+CODE\s*[:\-]?\s*(\d{8,10})', block_fixed)
             imp_hs = imp_m.group(1)[:8] if imp_m else ""
@@ -393,15 +603,19 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             exp_hs = exp_m.group(1)[:8] if exp_m else ""
 
             # --- ORIGINAL CO REFERENCE NUMBER ---
-            orig_match = re.search(r'(?is)CO\s+Reference\s+Number[\s:,\-]*\n*(.*?)(?=\n*Issuance|\n*Date|\n*Page|\n*TOTAL|$)', block_fixed)
+            orig_match = re.search(r'(?is)CO\s+Reference\s+Number[\s:,\-\|_]*\n*(.*?)(?=\n*Issuance|\n*Date|\n*Page|\n*TOTAL|$)', block_fixed)
             if orig_match:
                 orig_co_raw = orig_match.group(1).strip()
                 orig_co = re.sub(r'\s+', '', orig_co_raw)
+                # Cắt bỏ mọi ký tự rác (như || hoặc ||_) đứng trước chữ TEXCOM hoặc ở 2 đầu chuỗi
+                if "TEXCOM" in orig_co.upper():
+                    orig_co = orig_co[orig_co.upper().find("TEXCOM"):]
+                orig_co = re.sub(r'^[^A-Za-z0-9]+|[^A-Za-z0-9]+$', '', orig_co)
                 
                 if form_type == "AI":
                     co_parts = re.split(r'([/\-])', orig_co)
                     if len(co_parts) >= 9:
-                        p4 = co_parts[6].upper()
+                        p4 = re.sub(r'[^A-Za-z0-9]', '', co_parts[6].upper())
                         if p4.endswith("4"):
                             if p4.endswith("A4"): p4 = p4[:-1]
                             else: p4 = p4[:-1] + "A"
@@ -415,7 +629,8 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
                             p5_clean = p5_raw  
                         orig_co = "".join(co_parts[:8]) + p5_clean
 
-            iss_m = re.search(r'(?i)Issuance\s+Date:\s*\n*(\d{1,2}-[A-Za-z]{3}-\d{4})', block_fixed)
+            # Cho phép vượt qua ký tự '|' hoặc '_' ở đầu dòng mới giữa 'Issuance Date:' và '08-APR-2026'
+            iss_m = re.search(r'(?i)Issuance\s*Date[\s:;\.\-\|_]*(\d{1,2}-[A-Za-z]{3}-\d{4})', block_fixed)
             orig_date = iss_m.group(1).upper() if iss_m else ""
 
             # --- ORIGIN CRITERIA ---
@@ -445,6 +660,14 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             clean_lines = [l.strip() for l in desc_zone.split('\n') if l.strip() and not re.search(r'N/M|\bCARTONS?\b', l, re.I)]
             raw_desc = " ".join(clean_lines)
 
+            # Xóa mã Invoice (nếu còn sót) khỏi Description
+            if invoice:
+                for inv_code in invoice.replace(" IN", "").split(","):
+                    inv_code = inv_code.strip()
+                    if len(inv_code) > 2:
+                        num_part = inv_code[2:]
+                        raw_desc = re.sub(r'\b(?:[VY]N\s*)?' + re.escape(num_part) + r'\b', '', raw_desc, flags=re.IGNORECASE)
+
             # --- TRÍCH XUẤT BOX 7 QUANTITY VÀ UOM (DÙNG TỪ KHÓA IMPORTING LÀM ĐIỂM NEO) ---
             qty_box7, uom_box7 = "", ""
             box7_match = re.search(r'[-–—]\s*(\d+[\d\.,]*)\s*([A-Za-z]{2,8})\b', raw_desc)
@@ -473,7 +696,8 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             raw_desc = re.sub(r'\b(RVC|W\s*O|WoO|PE|CTSH|CTH|CC|PSR)\b[\d\.\+%\s]*', '', raw_desc, flags=re.IGNORECASE)
             
             raw_desc = re.sub(r'[-–—]\s*(?:USD|EUR|VND)?\s*\d+[\d\.,]*\s*$', '', raw_desc, flags=re.IGNORECASE).strip()
-            raw_desc = re.sub(r'[-–—:;\,\.\s]+$', '', raw_desc).strip()
+            raw_desc = re.sub(r'^\s*[|\_]+[\s|\_]*(?:[A-Za-z]\s+)?', '', raw_desc).strip()
+            raw_desc = re.sub(r'[\s|\_\-\–\—:;\,\.]+$', '', raw_desc).strip()
             raw_desc = re.sub(r'\s+[a-zA-Z]{1,2}$', '', raw_desc).strip()
 
             desc = clean_text(raw_desc)
