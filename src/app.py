@@ -10,6 +10,8 @@ import smtplib
 import uuid
 import shutil
 import difflib
+from collections import Counter
+from html import escape as html_escape
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import numpy as np
@@ -1283,6 +1285,13 @@ APP_CSS = """
     --coo-shadow: 0 1px 2px rgba(15, 23, 42, 0.05), 0 6px 16px rgba(15, 23, 42, 0.05);
     --coo-radius: 14px;
     --coo-dur: 180ms;
+    --coo-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+    --coo-hover: rgba(15, 23, 42, 0.04);
+    /* Màu trạng thái (nền nhạt + chữ đậm, tương phản >= 6:1) */
+    --coo-ok: #188038;       --coo-ok-fg: #FFFFFF;  --coo-ok-bg: #E6F4EA;   --coo-ok-text: #0D652D;  --coo-ok-line: rgba(24, 128, 56, 0.28);
+    --coo-warn-bg: #FEF3D6;  --coo-warn-text: #7A4B00;
+    --coo-err-bg: #FCE8E6;   --coo-err-text: #A50E0E;
+    --coo-new-bg: rgba(15, 23, 42, 0.07); --coo-new-text: #47505E;
 }
 @media (prefers-color-scheme: dark) {
     :root {
@@ -1290,15 +1299,63 @@ APP_CSS = """
         --coo-muted: #A3ACB9;       /* trên nền tối: 8.2:1 */
         --coo-border: rgba(255, 255, 255, 0.12);
         --coo-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+        --coo-hover: rgba(255, 255, 255, 0.05);
+        --coo-ok: #34C759;       --coo-ok-fg: #06250F;  --coo-ok-bg: rgba(52, 199, 89, 0.13);  --coo-ok-text: #86E3A1;  --coo-ok-line: rgba(52, 199, 89, 0.38);
+        --coo-warn-bg: rgba(255, 204, 0, 0.16);  --coo-warn-text: #FFD666;
+        --coo-err-bg: rgba(255, 69, 58, 0.18);   --coo-err-text: #FF9F97;
+        --coo-new-bg: rgba(255, 255, 255, 0.10); --coo-new-text: #C3CAD4;
     }
 }
 #MainMenu, footer, [data-testid="stAppDeployButton"] { visibility: hidden; }
 .block-container { padding-top: 4rem; max-width: 1400px; }
 
-.coo-header { margin: 0 0 1.25rem 0; animation: coo-fade var(--coo-dur) ease-out; }
-.coo-title { font-size: 1.85rem; font-weight: 750; letter-spacing: -0.02em; line-height: 1.2; margin: 0; }
+.coo-header { margin: 0 0 1.5rem 0; animation: coo-fade 240ms var(--coo-ease); }
+.coo-title { font-size: 2rem; font-weight: 750; letter-spacing: -0.025em; line-height: 1.2; margin: 0; }
 .coo-title .hl { color: var(--coo-accent); }
-.coo-sub { color: var(--coo-muted); font-size: 0.95rem; margin-top: 0.3rem; }
+
+/* --- Thanh tổng số file đã tải lên --- */
+.coo-count { display: flex; align-items: center; gap: 0.8rem; padding: 0.75rem 0.95rem; margin: 0.15rem 0 0.55rem 0;
+             border-radius: 12px; background: var(--coo-ok-bg); border: 1px solid var(--coo-ok-line);
+             animation: coo-pop 260ms var(--coo-ease); }
+.coo-count-icon { flex: none; width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center;
+                  background: var(--coo-ok); color: var(--coo-ok-fg); font-weight: 800; font-size: 0.95rem; }
+.coo-count-main { display: flex; align-items: baseline; gap: 0.4rem; flex-wrap: wrap; min-width: 0; }
+.coo-count-num { font-size: 1.5rem; font-weight: 750; line-height: 1; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.coo-count-label { font-weight: 600; font-size: 0.95rem; }
+.coo-count-meta { margin-left: auto; flex: none; color: var(--coo-muted); font-size: 0.86rem; font-variant-numeric: tabular-nums; }
+.coo-count.empty { background: var(--coo-hover); border: 1px dashed var(--coo-border); animation: none; }
+.coo-count.empty .coo-count-icon { background: var(--coo-new-bg); color: var(--coo-muted); }
+.coo-count.empty .coo-count-label { font-weight: 600; }
+.coo-count.empty .coo-count-meta { margin-left: 0; display: block; margin-top: 0.1rem; }
+
+/* --- Danh sách tệp đã tải lên (cuộn trong khung, hợp với hàng trăm file) --- */
+.coo-files { max-height: 276px; overflow-y: auto; border: 1px solid var(--coo-border); border-radius: 12px;
+             scrollbar-width: thin; scroll-behavior: smooth; overscroll-behavior: contain;
+             animation: coo-fade 220ms var(--coo-ease); }
+.coo-files:focus-visible { outline: 2px solid var(--coo-btn); outline-offset: 2px; }
+.coo-file { display: grid; grid-template-columns: 2.2rem minmax(0, 1fr) auto auto; align-items: center; column-gap: 0.65rem;
+            padding: 0.5rem 0.8rem; font-size: 0.9rem; line-height: 1.35; border-bottom: 1px solid var(--coo-border);
+            transition: background-color var(--coo-dur) ease; }
+.coo-file:last-child { border-bottom: 0; }
+.coo-file:hover { background: var(--coo-hover); }
+.coo-file[style] { animation: coo-fade 260ms var(--coo-ease) both; animation-delay: calc(var(--i) * 22ms); }
+.coo-file-idx { text-align: right; color: var(--coo-muted); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
+.coo-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.coo-file-tags { display: inline-flex; gap: 0.3rem; }
+.coo-file-size { min-width: 4.2rem; text-align: right; color: var(--coo-muted); font-size: 0.8rem; font-variant-numeric: tabular-nums; }
+.coo-tag { font-size: 0.72rem; font-weight: 650; padding: 0.14rem 0.55rem; border-radius: 999px; white-space: nowrap; }
+.coo-tag.ok { background: var(--coo-ok-bg); color: var(--coo-ok-text); }
+.coo-tag.warn { background: var(--coo-warn-bg); color: var(--coo-warn-text); }
+.coo-tag.err { background: var(--coo-err-bg); color: var(--coo-err-text); }
+.coo-tag.new { background: var(--coo-new-bg); color: var(--coo-new-text); }
+.coo-note { display: flex; gap: 0.5rem; align-items: flex-start; margin-top: 0.6rem; padding: 0.55rem 0.75rem; border-radius: 10px;
+            background: var(--coo-warn-bg); color: var(--coo-warn-text); font-size: 0.86rem; }
+@media (max-width: 640px) {
+    .coo-file { grid-template-columns: 1.8rem minmax(0, 1fr) auto; }
+    .coo-file-size { display: none; }
+    .coo-count-meta { display: none; }
+}
+
 .coo-step { font-size: 0.78rem; font-weight: 650; letter-spacing: 0.06em; text-transform: uppercase;
             color: var(--coo-muted); margin-bottom: 0.35rem; }
 .coo-hint { color: var(--coo-muted); font-size: 0.86rem; }
@@ -1333,7 +1390,11 @@ button[kind="primary"]:disabled, [data-testid="stBaseButton-primary"]:disabled {
                            animation: coo-fade var(--coo-dur) ease-out; }
 [data-testid="stMetricLabel"] p { color: var(--coo-muted); }
 
+/* Khung xổ danh sách tệp: bo góc đồng bộ với thẻ */
+.st-key-coo_upload [data-testid="stExpander"] details { border-radius: 12px; }
+
 @keyframes coo-fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@keyframes coo-pop { from { opacity: 0; transform: scale(0.98); } to { opacity: 1; transform: none; } }
 @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation: none !important; transition: none !important; }
 }
@@ -1446,11 +1507,100 @@ def render_header():
         """
         <div class="coo-header">
             <p class="coo-title"><span class="hl">PDF</span> Extract to <span class="hl">Excel</span> Pipeline</p>
-            <div class="coo-sub">Hệ thống trích xuất PDF tự động (Hỗ trợ cả file Scan) · C/O Form D, E, AI</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+
+
+FILE_TAGS = {STATUS_OK: ("ok", "Thành công"), STATUS_WARN: ("warn", "Cảnh báo"), STATUS_ERR: ("err", "Lỗi")}
+FILE_SEARCH_MIN = 8          # từ bao nhiêu file thì hiện ô tìm kiếm
+FILE_ANIMATED_ROWS = 12      # chỉ các dòng đầu có hiệu ứng lần lượt, để danh sách hàng trăm file vẫn nhẹ
+
+
+def _format_size(num_bytes):
+    num_bytes = num_bytes or 0
+    if num_bytes >= 1024 * 1024: return f"{num_bytes / (1024 * 1024):.1f} MB"
+    if num_bytes >= 1024: return f"{num_bytes / 1024:.0f} KB"
+    return f"{num_bytes} B"
+
+
+def _file_list_html(shown, name_counts, status_by_name, has_results):
+    """Danh sách tệp dạng HTML một khối (một dòng, không thụt lề) – nhanh kể cả với hàng trăm file."""
+    rows = []
+    for pos, (idx, f) in enumerate(shown):
+        name = html_escape(f.name)
+        tags = ""
+        status = status_by_name.get(f.name)
+        if status in FILE_TAGS:
+            css_class, label = FILE_TAGS[status]
+            tags += f'<span class="coo-tag {css_class}">{label}</span>'
+        elif has_results:
+            tags += '<span class="coo-tag new">Chưa xử lý</span>'
+        if name_counts[f.name] > 1:
+            tags += '<span class="coo-tag warn">Trùng tên</span>'
+        stagger = f' style="--i:{pos}"' if pos < FILE_ANIMATED_ROWS else ""
+        rows.append(
+            f'<div class="coo-file" role="listitem"{stagger}>'
+            f'<span class="coo-file-idx">{idx}</span>'
+            f'<span class="coo-file-name" title="{name}">{name}</span>'
+            f'<span class="coo-file-tags">{tags}</span>'
+            f'<span class="coo-file-size">{_format_size(getattr(f, "size", 0))}</span>'
+            f'</div>'
+        )
+    return ('<div class="coo-files" role="list" tabindex="0" aria-label="Danh sách tệp đã tải lên">'
+            + "".join(rows) + '</div>')
+
+
+def render_uploaded_files(files):
+    """Cho người dùng thấy ngay: ĐÃ TẢI LÊN BAO NHIÊU file và ĐÓ LÀ NHỮNG FILE NÀO (tên đầy đủ, tìm được)."""
+    count = len(files)
+    if not count:
+        st.markdown(
+            '<div class="coo-count empty"><span class="coo-count-icon">↑</span>'
+            '<span><span class="coo-count-label">Chưa có file nào được tải lên</span>'
+            '<span class="coo-count-meta">Kéo thả hoặc bấm Upload · chọn nhiều file cùng lúc bằng Ctrl/Shift</span></span></div>',
+            unsafe_allow_html=True,
+        )
+        return
+
+    total_bytes = sum(getattr(f, "size", 0) or 0 for f in files)
+    name_counts = Counter(f.name for f in files)
+    dup_names = [name for name, n in name_counts.items() if n > 1]
+    st.markdown(
+        '<div class="coo-count" role="status"><span class="coo-count-icon">✓</span>'
+        f'<span class="coo-count-main"><span class="coo-count-num">{count}</span>'
+        '<span class="coo-count-label">file đã tải lên</span></span>'
+        f'<span class="coo-count-meta">Tổng dung lượng {_format_size(total_bytes)}</span></div>',
+        unsafe_allow_html=True,
+    )
+
+    status_by_name = {s["Tệp"]: s["Trạng thái"] for s in st.session_state.file_status}
+    has_results = st.session_state.extracted_data is not None
+    with st.expander(f"Danh sách tệp đã tải lên ({count})", expanded=True):
+        query = ""
+        if count > FILE_SEARCH_MIN:
+            query = st.text_input(
+                "Tìm tệp", key="coo_file_search", placeholder="Tìm theo tên tệp, rồi nhấn Enter…",
+                label_visibility="collapsed", disabled=st.session_state.is_processing,
+            ).strip().lower()
+        shown = [(idx, f) for idx, f in enumerate(files, start=1) if query in f.name.lower()]
+        if query:
+            st.markdown(f'<div class="coo-hint">Khớp {len(shown)}/{count} tệp với “{html_escape(query)}”</div>',
+                        unsafe_allow_html=True)
+        if shown:
+            st.markdown(_file_list_html(shown, name_counts, status_by_name, has_results), unsafe_allow_html=True)
+        else:
+            st.markdown('<div class="coo-hint">Không có tệp nào khớp. Xóa từ khóa để xem lại toàn bộ danh sách.</div>',
+                        unsafe_allow_html=True)
+
+    if dup_names:
+        preview = ", ".join(html_escape(n) for n in dup_names[:3]) + ("…" if len(dup_names) > 3 else "")
+        st.markdown(
+            f'<div class="coo-note"><span>⚠</span><span>{len(dup_names)} tên tệp bị tải lên trùng ({preview}). '
+            'Mỗi bản sẽ được trích xuất một lần nên Excel sẽ có dòng lặp – hãy bỏ bớt bản trùng nếu không cần.</span></div>',
+            unsafe_allow_html=True,
+        )
 
 
 def render_upload_card():
@@ -1461,14 +1611,7 @@ def render_upload_card():
             disabled=st.session_state.is_processing,
         )
         st.session_state.pdf_files = uploaded_files or []
-        count = len(st.session_state.pdf_files)
-        if count:
-            total_mb = sum(getattr(f, "size", 0) or 0 for f in st.session_state.pdf_files) / (1024 * 1024)
-            st.markdown(f'<div class="coo-hint">Đã tải lên: <b>{count} file</b> · {total_mb:.1f} MB</div>',
-                        unsafe_allow_html=True)
-        else:
-            st.markdown('<div class="coo-hint">Đã tải lên: 0 file · Chọn nhiều file cùng lúc bằng Ctrl/Shift.</div>',
-                        unsafe_allow_html=True)
+        render_uploaded_files(st.session_state.pdf_files)
 
 
 def render_action_card():
