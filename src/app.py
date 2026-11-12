@@ -8,6 +8,8 @@ import time
 import requests  
 import smtplib
 import uuid
+import shutil
+import difflib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import numpy as np
@@ -24,8 +26,21 @@ import logging
 # 1. Configure logging level
 logging.basicConfig(level=logging.INFO)
 
-# [LƯU Ý]: Nếu chạy trên máy tính Windows thì đổi thành r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
+def _resolve_tesseract_cmd():
+    """Tìm tesseract: biến môi trường TESSERACT_CMD -> PATH -> đường dẫn mặc định Linux/Windows.
+    Trên server Linux (Streamlit Cloud) kết quả vẫn là '/usr/bin/tesseract' như trước."""
+    env_cmd = os.environ.get("TESSERACT_CMD")
+    if env_cmd:
+        return env_cmd
+    found = shutil.which("tesseract")
+    if found:
+        return found
+    for candidate in ("/usr/bin/tesseract", r"C:\Program Files\Tesseract-OCR\tesseract.exe"):
+        if os.path.exists(candidate):
+            return candidate
+    return "/usr/bin/tesseract"
+
+pytesseract.pytesseract.tesseract_cmd = _resolve_tesseract_cmd()
 # ==========================================
 # 1. CẤU HÌNH CỘT DỮ LIỆU ĐẦU RA 
 # ==========================================
@@ -86,24 +101,218 @@ def record_file_processing(session_id, file_count):
     except Exception as e:
         print(f"[!] Lỗi ghi nhận File Record: {e}")
 
+MONTHS_MAP = {
+    "jan": "01", "feb": "02", "mar": "03", "apr": "04", "may": "05", "jun": "06",
+    "jul": "07", "aug": "08", "sep": "09", "oct": "10", "nov": "11", "dec": "12",
+}
+
 def format_to_dd_mm_yyyy(date_str):
+    """Hàm chuẩn hóa ngày DÙNG CHUNG cho cả Form D, E, AI.
+    Mọi định dạng (01/11/2026, 2026-11-01, 10 November 2026, 30-SEP-2026...) -> chuỗi 'DD-MM-YYYY'.
+    Không nhận diện được thì trả lại nguyên chuỗi (không đoán)."""
     if not date_str: return ""
-    date_str = date_str.strip()
-    months_map = {
-        "jan": "01", "feb": "02", "mar": "03", "apr": "04", "may": "05", "jun": "06",
-        "jul": "07", "aug": "08", "sep": "09", "oct": "10", "nov": "11", "dec": "12",
-        "january": "01", "february": "02", "march": "03", "april": "04", "june": "06",
-        "july": "07", "august": "08", "september": "09", "october": "10", "november": "11", "december": "12"
-    }
+    date_str = str(date_str).strip()
     match = re.search(r'(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})', date_str)
     if match: return f"{int(match.group(1)):02d}-{int(match.group(2)):02d}-{match.group(3)}"
     match = re.search(r'(\d{4})[\/\-\.](\d{1,2})[\/\-\.](\d{1,2})', date_str)
     if match: return f"{int(match.group(3)):02d}-{int(match.group(2)):02d}-{match.group(1)}"
-    match = re.search(r'(\d{1,2})\s*[\-\s]\s*([A-Za-z]+)\s*[\-\s]\s*(\d{4})', date_str)
+    match = re.search(r'(\d{1,2})\s*[\-\s]\s*([A-Za-z]+)\.?\s*[\-\s]\s*(\d{4})', date_str)
     if match:
-        m_str = match.group(2).lower()
-        if m_str in months_map: return f"{int(match.group(1)):02d}-{months_map[m_str]}-{match.group(3)}"
+        # So khớp theo 3 ký tự đầu của tên tháng: 'Sep', 'Sept', 'September' đều -> 09
+        m_key = match.group(2).lower()[:3]
+        if m_key in MONTHS_MAP: return f"{int(match.group(1)):02d}-{MONTHS_MAP[m_key]}-{match.group(3)}"
     return date_str
+
+# Alias để code mới gọi rõ nghĩa hơn; vẫn là MỘT hàm duy nhất.
+normalize_date = format_to_dd_mm_yyyy
+
+
+# ==========================================
+# 1b. CÁC HÀM DÙNG CHUNG: BOX 3 (TRANSPORT), BOX 11 (PRODUCED IN / EXPORTED TO)
+# ==========================================
+# Nhãn in sẵn trong Box 3 – chịu biến thể OCR: ’ ' ‘ ` ´, 'etc.' / 'ete.' / 'etc', thiếu/thừa khoảng trắng, ':' ';' '.'
+TRANSPORT_LABEL_PATTERNS = [
+    r"3\.?\s*Means\s+of\s+transport.*?\)",
+    r"Departure\s*Date\s*[:;.]?",
+    r"Vessel\s*[’'‘`´]?\s*s?\s*Na\w{1,3}\s*[/\\|lI1]?\s*(?:or\s*)?Air\s*[a-z]{3,6}\s*[,.]?\s*(?:et\s*[ce]\s*\.?)?\s*[:;.]?",
+    r"(?<![A-Za-z])et[ce]\s*\.\s*[:;]",
+    r"Port\s+of\s+Discharge\s*[:;.]?",
+]
+
+def strip_transport_labels(text):
+    """Loại bỏ các nhãn in sẵn của Box 3, chỉ giữ nội dung thật (ngày, phương tiện, tàu, cảng)."""
+    if not text: return ""
+    for pat in TRANSPORT_LABEL_PATTERNS:
+        text = re.sub(pat, " ", text, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+BOX11_PRODUCED_RE = re.compile(r"(?i)^produc")
+BOX11_EXPORTED_RE = re.compile(r"(?i)^exported\b")
+BOX11_COUNTRY_LABEL_RE = re.compile(r"(?i)^\(?c[o0]untr")
+BOX11_IMPORTING_RE = re.compile(r"(?i)^\(?(?:im|lm|in)p?[o0]rt")
+BOX11_LABEL_VOCAB_RE = re.compile(r"(?i)^\(?(?:country|importing|produced|exported|to|in|goods|the|for|and|place|date)\)?[.,:;]?$")
+COUNTRY_VALUE_RE = re.compile(r"^[A-Z][A-Z .'\-]{2,40}$")
+
+def _ocr_words_from_image(pil_img, scale, offset_x, offset_y, config=r'--oem 3 --psm 11'):
+    """OCR một ảnh và trả về danh sách từ với tọa độ đã quy đổi về đơn vị point của PDF."""
+    data = pytesseract.image_to_data(pil_img, output_type=Output.DICT, config=config)
+    words = []
+    for i, raw in enumerate(data['text']):
+        txt = (raw or "").strip()
+        if not txt: continue
+        words.append({
+            'text': txt,
+            'x0': offset_x + data['left'][i] * scale,
+            'x1': offset_x + (data['left'][i] + data['width'][i]) * scale,
+            'top': offset_y + data['top'][i] * scale,
+            'bottom': offset_y + (data['top'][i] + data['height'][i]) * scale,
+        })
+    return words
+
+def _box11_region(page_width, page_height):
+    # Box 11 là nửa trái, nằm giữa đáy bảng hàng hóa và Box 13 (tỷ lệ theo khổ A4 của mẫu C/O)
+    return (0, page_height * 0.62, page_width * 0.5, page_height * 0.92)
+
+def _first_label(words, regex, min_top=None):
+    cands = [w for w in words if regex.search(w['text']) and (min_top is None or w['top'] > min_top)]
+    return min(cands, key=lambda w: w['top']) if cands else None
+
+def _value_line_below(label, stop_label, value_words):
+    """Lấy dòng chữ nằm NGAY DƯỚI nhãn (và phía trên nhãn kế tiếp nếu có)."""
+    lh = max(label['bottom'] - label['top'], 4)
+    min_top = label['top'] + 0.6 * lh
+    max_top = (stop_label['top'] + 0.5 * max(stop_label['bottom'] - stop_label['top'], 4)) if stop_label else label['bottom'] + 30
+    cands = [w for w in value_words
+             if min_top <= w['top'] < max_top and not BOX11_LABEL_VOCAB_RE.match(w['text'])]
+    if not cands: return ""
+    first_top = min(w['top'] for w in cands)
+    line = sorted([w for w in cands if abs(w['top'] - first_top) <= 3], key=lambda w: w['x0'])
+    # Tách cụm theo khoảng trống ngang lớn: chữ trên con dấu/chữ ký cùng hàng không bị ghép vào tên nước
+    clusters, current = [], [line[0]]
+    for prev, w in zip(line, line[1:]):
+        if w['x0'] - prev['x1'] > 12:
+            clusters.append(current); current = [w]
+        else:
+            current.append(w)
+    clusters.append(current)
+    for cluster in clusters:
+        value = " ".join(w['text'] for w in cluster)
+        value = re.sub(r"[^A-Za-z .'\-]", "", value).strip(" .-'").upper()
+        value = re.sub(r"\s+", " ", value)
+        if COUNTRY_VALUE_RE.match(value):
+            return value
+    return ""
+
+def locate_box11_countries(label_words, value_words):
+    """
+    Xác định 'Produced in' và 'Exported to' theo VỊ TRÍ so với nhãn của Box 11:
+      - Produced in  = dòng ngay dưới nhãn '...produced in' (trên nhãn '(Country)')
+      - Exported to  = dòng ngay dưới nhãn '...goods exported to' (trên nhãn '(Importing Country)')
+    Trả về (produced_in, exported_to, warnings). Không xác định được thì để trống, không đoán.
+    """
+    warnings = []
+    produced_in, exported_to = "", ""
+    lbl_prod = _first_label(label_words, BOX11_PRODUCED_RE)
+    if lbl_prod:
+        lbl_country = _first_label(label_words, BOX11_COUNTRY_LABEL_RE, min_top=lbl_prod['bottom'])
+        produced_in = _value_line_below(lbl_prod, lbl_country, value_words)
+    lbl_exp = _first_label(label_words, BOX11_EXPORTED_RE, min_top=lbl_prod['bottom'] if lbl_prod else None)
+    if lbl_exp:
+        lbl_imp = _first_label(label_words, BOX11_IMPORTING_RE, min_top=lbl_exp['bottom'])
+        exported_to = _value_line_below(lbl_exp, lbl_imp, value_words)
+
+    if not lbl_prod: warnings.append("Box 11: không tìm thấy nhãn 'produced in' → để trống Produced in")
+    elif not produced_in: warnings.append("Box 11: không đọc được tên nước dưới nhãn 'produced in' → để trống Produced in")
+    if not lbl_exp: warnings.append("Box 11: không tìm thấy nhãn 'goods exported to' → để trống Exported to")
+    elif not exported_to: warnings.append("Box 11: không đọc được tên nước dưới nhãn 'exported to' → để trống Exported to")
+    return produced_in, exported_to, warnings
+
+def extract_box11_countries_textlayer(page):
+    """PDF có text layer (pdfplumber page). Giá trị lấy từ text layer; nhãn lấy từ text layer,
+    nếu nhãn chỉ nằm trong ảnh nền của mẫu in thì OCR vùng Box 11 để định vị nhãn."""
+    bbox = _box11_region(page.width, page.height)
+    region = page.crop(bbox)
+    text_words = region.extract_words()
+    label_words = text_words
+    if not (_first_label(text_words, BOX11_PRODUCED_RE) and _first_label(text_words, BOX11_EXPORTED_RE)):
+        try:
+            img = region.to_image(resolution=200).original
+            label_words = _ocr_words_from_image(img, 72 / 200, bbox[0], bbox[1])
+        except Exception as e:
+            return "", "", [f"Box 11: lỗi OCR khi tìm nhãn ({e}) → để trống Produced in / Exported to"]
+    produced_in, exported_to, warnings = locate_box11_countries(label_words, text_words)
+    # Nếu tên nước không có trong text layer (vd. đóng dấu/viết tay) thì đọc giá trị từ OCR
+    if (not produced_in or not exported_to) and label_words is not text_words:
+        p2, e2, _ = locate_box11_countries(label_words, label_words)
+        if not produced_in and p2: produced_in = _snap_ocr_country(p2, "Produced in", warnings)
+        if not exported_to and e2: exported_to = _snap_ocr_country(e2, "Exported to", warnings)
+        warnings = [w for w in warnings
+                    if not (("Produced in" in w and produced_in) or ("Exported to" in w and exported_to))]
+    return produced_in, exported_to, warnings
+
+KNOWN_COUNTRIES = [
+    "BRUNEI DARUSSALAM", "BRUNEI", "CAMBODIA", "INDONESIA", "LAO PDR", "LAOS", "MALAYSIA", "MYANMAR",
+    "PHILIPPINES", "SINGAPORE", "THAILAND", "VIETNAM", "VIET NAM", "CHINA", "INDIA", "JAPAN", "KOREA",
+    "AUSTRALIA", "NEW ZEALAND", "HONG KONG",
+]
+
+def _snap_ocr_country(value, field, warnings):
+    """Chỉ dùng cho giá trị đọc bằng OCR: sửa lỗi OCR nhỏ (vd. 'VIETNA' -> 'VIETNAM') theo danh sách nước.
+    Không khớp đủ gần thì giữ nguyên giá trị OCR và cảnh báo để người dùng kiểm tra."""
+    if not value: return value
+    if value in KNOWN_COUNTRIES: return value
+    match = difflib.get_close_matches(value, KNOWN_COUNTRIES, n=1, cutoff=0.8)
+    if match: return match[0]
+    warnings.append(f"Box 11: {field} = '{value}' (đọc bằng OCR, không có trong danh sách nước) – vui lòng kiểm tra")
+    return value
+
+def extract_box11_countries_scanned(fitz_page, zoom=300 / 72):
+    """PDF scan (PyMuPDF page): OCR vùng Box 11, nhãn và giá trị đều lấy từ OCR."""
+    x0, y0, x1, y1 = _box11_region(fitz_page.rect.width, fitz_page.rect.height)
+    pix = fitz_page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), clip=fitz.Rect(x0, y0, x1, y1))
+    mode = "RGBA" if pix.alpha else "RGB"
+    img = Image.frombytes(mode, [pix.width, pix.height], pix.samples).convert("RGB")
+    words = _ocr_words_from_image(img, 1 / zoom, x0, y0)
+    produced_in, exported_to, warnings = locate_box11_countries(words, words)
+    produced_in = _snap_ocr_country(produced_in, "Produced in", warnings)
+    exported_to = _snap_ocr_country(exported_to, "Exported to", warnings)
+    return produced_in, exported_to, warnings
+
+
+# ==========================================
+# 1c. BOX 7 (QUANTITY/UOM TRONG MÔ TẢ HÀNG) CHO FILE SCAN
+# ==========================================
+# Nếu Box 7 của C/O hoàn toàn KHÔNG ghi số lượng (vd. chỉ có "2 CARTON / BOY'S T-SHIRT"),
+# lấy số lượng/đơn vị của Box 9 cho cột H/I và gắn cảnh báo. Đặt False để để trống.
+BOX7_FALLBACK_TO_BOX9 = True
+UOM_WORDS_RE = r'(?:PCE|PCS|PC|PIECES?|PRS?|PAIRS?|SETS?|UNITS?|NOS|KGM|KGS?|DOZ|DZN|BOX(?:ES)?|ROLLS?|PKGS?|MTR|LTR)'
+
+def extract_box7_qty_scanned(raw_desc, block_text):
+    """Các cách trình bày Box 7 đã gặp:
+       (1) 'SOCKS - 100 SET'           (2) '... 100 SET' ngay trước 'IMPORTING COUNTRY'
+       (3) '... 100 SET' ở cuối mô tả  (4) gạch nối bị OCR đọc thành ~ = – — hoặc mất khoảng trắng
+       (5) '100 SET' nằm riêng một dòng (giống Form D) – có thể dính 'USD xx' của Box 9 cùng hàng."""
+    m = re.search(r'[-–—]\s*(\d+[\d\.,]*)\s*([A-Za-z]{2,8})\b', raw_desc)
+    if m: return m.group(1).replace(',', ''), m.group(2).upper()
+    m = re.search(r'(\d+[\d\.,]*)\s*([A-Za-z]{2,8})\s*(?:\n|\s)*IMPORTING\s+COUNTRY', block_text, re.IGNORECASE)
+    if m: return m.group(1).replace(',', ''), m.group(2).upper()
+    m = re.search(r'(?:\s|^)(\d+[\d\.,]*)\s*([A-Za-z]{2,8})\s*$', raw_desc)
+    if m: return m.group(1).replace(',', ''), m.group(2).upper()
+    # (4) gạch nối bị OCR đọc sai
+    m = re.search(r'[~=]\s*(\d+[\d\.,]*)\s*(' + UOM_WORDS_RE + r')\b', raw_desc, re.IGNORECASE)
+    if m: return m.group(1).replace(',', ''), m.group(2).upper()
+    # (5) số lượng nằm riêng một dòng trong vùng mô tả (trước IMPORTING COUNTRY)
+    desc_zone = re.split(r'(?i)(?:IMPORTING\s+COUNTRY|Original\s+CO|TOTAL|Page)', block_text)[0]
+    for line in desc_zone.split('\n'):
+        if re.search(r'N/M|\bCARTONS?\b', line, re.I): continue
+        rest = re.sub(r'(?i)USD\s*[\d\.,]+', ' ', line)
+        rest = re.sub(r'\b\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{4}\b', ' ', rest)
+        rest = re.sub(r'(?i)\b[VY]N\s*\d{6,}\S*', ' ', rest)
+        rest = re.sub(r'[|_\[\]]', ' ', rest).strip()
+        m = re.fullmatch(r'(\d+[\d\.,]*)\s*(' + UOM_WORDS_RE + r')\.?', rest, re.IGNORECASE)
+        if m: return m.group(1).replace(',', ''), m.group(2).upper()
+    return "", ""
 
 def clean_text(text):
     if not text: return ""
@@ -468,9 +677,17 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
                 form_type = "AI"
 
         produced_in, exported_to = "", ""
+        file_warnings = []
         if form_type == "AI":
             produced_in = "INDIA"
             exported_to = "VIETNAM"
+        elif form_type == "D":
+            # Form D: xác định theo vị trí so với nhãn Box 11 trên trang cuối (không đọc vùng đầu trang)
+            try:
+                produced_in, exported_to, box11_warn = extract_box11_countries_scanned(doc[-1])
+                file_warnings.extend(box11_warn)
+            except Exception as e:
+                file_warnings.append(f"Box 11: lỗi OCR ({e}) → để trống Produced in / Exported to")
         else:
             prod_match = re.search(r'([A-Za-z\s]+)\s*\(Country\)', top_flat, re.IGNORECASE)
             if prod_match: produced_in = prod_match.group(1).strip().upper()
@@ -489,16 +706,13 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
         
         b3_clean = pytesseract.image_to_string(img3, config=tess_config).strip()
         b3_clean = re.sub(r'\s+', ' ', b3_clean).strip()
-        b3_clean = re.sub(r'(?i)3\.?\s*Means of transport.*?\)', '', b3_clean)
-        b3_clean = re.sub(r'(?i)Departure Date\s*[:;]?', '', b3_clean)
-        b3_clean = re.sub(r'(?i)Vessel[\'’]?s?\s*Name[/\\]?Aircraft.*?etc\.?[:;]?', '', b3_clean)
-        b3_clean = re.sub(r'(?i)Port\s+of\s+Discharge\s*[:;]?', '', b3_clean)
-        
+        b3_clean = strip_transport_labels(b3_clean)
+
         transport = ""
         transport_match = re.search(r'(\d{1,2}\s+[A-Za-z]+\s+\d{4}.*)', b3_clean, re.IGNORECASE)
         if transport_match: transport = transport_match.group(1).strip()
         else: transport = b3_clean.strip()
-        transport = re.sub(r'\s+', ' ', transport).strip()
+        transport = strip_transport_labels(transport)
 
         # ---------------------------------------------------------
         # DATE OF CERTIFICATION
@@ -511,7 +725,7 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
         date_cert = ""
         cert_match = re.search(r'Lumpur\s*,\s*(\d{1,2}\s+[A-Za-z]+\s+\d{4})', cert_text, re.IGNORECASE)
         if cert_match:
-            date_cert = cert_match.group(1).strip()
+            date_cert = normalize_date(cert_match.group(1).strip())
 
         # ---------------------------------------------------------
         # MAIN ITEMS + SPATIAL COLUMN 10 EXTRACTION
@@ -536,14 +750,20 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
     matches = list(re.finditer(r'(?i)(?:N/M|N\s*/\s*M|N/W|M/N|N\.M)', main_text))
     
     if not matches:
-        extracted_data.append({
-            COLUMNS[0]: form_type, COLUMNS[1]: reference_no, COLUMNS[2]: "", COLUMNS[3]: "",
-            COLUMNS[4]: "[Lỗi OCR] Không tìm thấy dữ liệu Item.", COLUMNS[5]: "", COLUMNS[6]: "", 
-            COLUMNS[7]: "", COLUMNS[8]: "", COLUMNS[9]: "", COLUMNS[10]: "", COLUMNS[11]: "", 
-            COLUMNS[12]: "", COLUMNS[13]: "", COLUMNS[14]: "", COLUMNS[15]: "", COLUMNS[16]: date_cert, 
-            COLUMNS[17]: exporter, COLUMNS[18]: consignee, COLUMNS[19]: transport, COLUMNS[20]: produced_in, 
-            COLUMNS[21]: exported_to, COLUMNS[22]: "", COLUMNS[23]: box_13_str, COLUMNS[24]: third_party_val
+        # Ghi theo TÊN cột (trước đây dùng chỉ số cũ nên các giá trị bị lệch 2 cột)
+        error_row = {col: "" for col in COLUMNS}
+        error_row.update({
+            "Form": form_type, "Reference No": reference_no,
+            "English description": "[Lỗi OCR] Không tìm thấy dữ liệu Item.",
+            "Date of certification": date_cert,
+            "Products consigned from (Exporter's business name, address, country)": exporter,
+            "Products consigned to (Consignee's name, address, country)": consignee,
+            "Means of transport and route (as far as known)": transport,
+            "Produced in": produced_in, "Exported to": exported_to,
+            "Box 13": box_13_str, "Third party": third_party_val,
         })
+        extracted_data.append(error_row)
+        file_warnings.append("Không tìm thấy dòng hàng (N/M) bằng OCR – kiểm tra chất lượng bản scan")
     else:
         for i in range(len(matches)):
             start = matches[i].start()
@@ -668,22 +888,8 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
                         num_part = inv_code[2:]
                         raw_desc = re.sub(r'\b(?:[VY]N\s*)?' + re.escape(num_part) + r'\b', '', raw_desc, flags=re.IGNORECASE)
 
-            # --- TRÍCH XUẤT BOX 7 QUANTITY VÀ UOM (DÙNG TỪ KHÓA IMPORTING LÀM ĐIỂM NEO) ---
-            qty_box7, uom_box7 = "", ""
-            box7_match = re.search(r'[-–—]\s*(\d+[\d\.,]*)\s*([A-Za-z]{2,8})\b', raw_desc)
-            if box7_match:
-                qty_box7 = box7_match.group(1).replace(',', '')
-                uom_box7 = box7_match.group(2).upper()
-            else:
-                box7_match_2 = re.search(r'(\d+[\d\.,]*)\s*([A-Za-z]{2,8})\s*(?:\n|\s)*IMPORTING\s+COUNTRY', block_fixed, re.IGNORECASE)
-                if box7_match_2:
-                    qty_box7 = box7_match_2.group(1).replace(',', '')
-                    uom_box7 = box7_match_2.group(2).upper()
-                else:
-                    box7_match_3 = re.search(r'(?:\s|^)(\d+[\d\.,]*)\s*([A-Za-z]{2,8})\s*$', raw_desc)
-                    if box7_match_3:
-                        qty_box7 = box7_match_3.group(1).replace(',', '')
-                        uom_box7 = box7_match_3.group(2).upper()
+            # --- TRÍCH XUẤT BOX 7 QUANTITY VÀ UOM ---
+            qty_box7, uom_box7 = extract_box7_qty_scanned(raw_desc, block_fixed)
 
             if qty_box7 and uom_box7:
                 raw_desc = re.sub(r'[-–—]?\s*' + re.escape(qty_box7) + r'[\s\n]*' + re.escape(uom_box7) + r'\b', '', raw_desc, flags=re.IGNORECASE).strip()
@@ -701,6 +907,13 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             raw_desc = re.sub(r'\s+[a-zA-Z]{1,2}$', '', raw_desc).strip()
 
             desc = clean_text(raw_desc)
+
+            # Box 7 không ghi số lượng -> lấy theo Box 9 (sau khi đã làm sạch mô tả, không ảnh hưởng cột E)
+            if not (qty_box7 and uom_box7) and BOX7_FALLBACK_TO_BOX9 and qty and uom:
+                qty_box7, uom_box7 = qty, uom
+                file_warnings.append(f"Item {item_no}: Box 7 không ghi số lượng → Quantity/UOM - Box 7 lấy theo Box 9 ({qty} {uom})")
+
+            date_inv = normalize_date(date_inv)
 
             extracted_data.append({
                 COLUMNS[0]: form_type, COLUMNS[1]: reference_no, COLUMNS[2]: clean_text(orig_co),
@@ -731,7 +944,8 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
                     if len(display_value) > 100: display_value = display_value[:97] + "..."
                     logging.info(f"   + {key}: {display_value}")
     print("="*70 + "\n")
-    return {"error": None, "data": extracted_data, "file_name": file_name}
+    return {"error": None, "data": extracted_data, "file_name": file_name,
+            "warnings": file_warnings, "scanned": True}
 
 # ==========================================
 # 3. XỬ LÝ CHÍNH CHO FILE PDF CÓ TEXT LAYER (CŨ)
@@ -744,7 +958,7 @@ def extract_global_info(page_first, page_last):
 
     exporter = clean_text(page_first.crop(bbox_exporter).extract_text())
     consignee = clean_text(page_first.crop(bbox_consignee).extract_text())
-    transport = clean_text(page_first.crop(bbox_transport).extract_text())
+    transport = clean_text(strip_transport_labels(page_first.crop(bbox_transport).extract_text()))
     
     raw_ref = page_first.crop(bbox_ref_no).extract_text()
     ref_match = re.search(r'Reference No\.\s*([A-Z0-9\-]+)', raw_ref, re.IGNORECASE)
@@ -794,10 +1008,23 @@ def extract_global_info(page_first, page_last):
     box11_text = clean_text(page_last.crop(bbox_box11).extract_text())
     box12_text = clean_text(page_last.crop(bbox_box12).extract_text())
     
-    asean_china = ["CHINA", "VIETNAM", "MALAYSIA", "SINGAPORE", "INDONESIA", "THAILAND", "PHILIPPINES", "BRUNEI", "CAMBODIA", "LAOS", "MYANMAR"]
-    country_matches = re.findall(r'\b(' + '|'.join(asean_china) + r')\b', box11_text, re.IGNORECASE)
-    produced_in = country_matches[0].upper() if len(country_matches) > 0 else ""
-    exported_to = country_matches[1].upper() if len(country_matches) > 1 else ""
+    # --- BOX 11: Produced in / Exported to theo VỊ TRÍ so với nhãn (không lấy "nước đầu tiên" trong vùng) ---
+    # Lỗi cũ: vùng cắt (0,545,...) dính dòng "Third Party Invoicing by: ... 397799 SINGAPORE" ở đáy bảng
+    # trang cuối của Form D, nên nước đầu tiên luôn là SINGAPORE và nước thứ hai là nước sản xuất.
+    warnings = []
+    try:
+        produced_in, exported_to, warnings = extract_box11_countries_textlayer(page_last)
+    except Exception as e:
+        produced_in, exported_to = "", ""
+        warnings = [f"Box 11: lỗi khi đọc ({e}) → để trống Produced in / Exported to"]
+
+    if form_type == "E" and not (produced_in and exported_to):
+        # Giữ nguyên cách cũ cho Form E khi không định vị được nhãn (Form E đang đúng với cách này)
+        asean_china = ["CHINA", "VIETNAM", "MALAYSIA", "SINGAPORE", "INDONESIA", "THAILAND", "PHILIPPINES", "BRUNEI", "CAMBODIA", "LAOS", "MYANMAR"]
+        country_matches = re.findall(r'\b(' + '|'.join(asean_china) + r')\b', box11_text, re.IGNORECASE)
+        if not produced_in and len(country_matches) > 0: produced_in = country_matches[0].upper()
+        if not exported_to and len(country_matches) > 1: exported_to = country_matches[1].upper()
+        warnings = []
     
     date_cert = format_to_dd_mm_yyyy(re.search(r'(\d{1,2}\s+[A-Za-z]+\s+\d{4})', box12_text).group(1)) if re.search(r'(\d{1,2}\s+[A-Za-z]+\s+\d{4})', box12_text) else ""
 
@@ -805,7 +1032,7 @@ def extract_global_info(page_first, page_last):
         "exporter": exporter, "consignee": consignee, "transport": transport,
         "reference_no": reference_no, "movement_cert": movement_cert, "third_party": third_party,
         "produced_in": produced_in, "exported_to": exported_to, "date_of_cert": date_cert,
-        "form_type": form_type
+        "form_type": form_type, "warnings": warnings
     }
 
 def parse_description_fields(desc_text, weight_value_text=""):
@@ -948,8 +1175,6 @@ def process_single_pdf(file_data):
         with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
             first_page_text = pdf.pages[0].extract_text()
             if not first_page_text or len(first_page_text.strip()) < 50:
-                if "scanned_files_detected" in st.session_state:
-                    st.session_state.scanned_files_detected.append(file_name)
                 return process_scanned_pdf(pdf, file_bytes, file_name)
 
             global_info = extract_global_info(pdf.pages[0], pdf.pages[-1])
@@ -1039,173 +1264,366 @@ def process_single_pdf(file_data):
                     COLUMNS[26]: third_party_column_val
                 })
     except Exception as e:
-        return {"error": f"{file_name}: Lỗi trích xuất - {str(e)}", "data": [], "file_name": file_name}
-    return {"error": None, "data": extracted_data, "file_name": file_name}
+        return {"error": f"{file_name}: Lỗi trích xuất - {str(e)}", "data": [], "file_name": file_name,
+                "warnings": [], "scanned": False}
+    return {"error": None, "data": extracted_data, "file_name": file_name,
+            "warnings": global_info.get("warnings", []), "scanned": False}
 
 # ==========================================
-# 4. GIAO DIỆN STREAMLIT
+# 4. GIAO DIỆN STREAMLIT (chỉ trình bày & luồng tương tác – không chứa logic trích xuất)
 # ==========================================
+APP_CSS = """
+<style>
+:root {
+    --coo-accent: #006BA6;          /* chữ nhấn trên nền sáng: tương phản 5.6:1 */
+    --coo-btn: #0073AE;             /* nền nút chính, chữ trắng: tương phản 5.0:1 */
+    --coo-btn-hover: #005E8F;
+    --coo-muted: #5B6472;           /* chữ phụ trên nền sáng: 6.1:1 */
+    --coo-border: rgba(15, 23, 42, 0.10);
+    --coo-shadow: 0 1px 2px rgba(15, 23, 42, 0.05), 0 6px 16px rgba(15, 23, 42, 0.05);
+    --coo-radius: 14px;
+    --coo-dur: 180ms;
+}
+@media (prefers-color-scheme: dark) {
+    :root {
+        --coo-accent: #5CC0F2;      /* trên nền tối #0E1117: 9.1:1 */
+        --coo-muted: #A3ACB9;       /* trên nền tối: 8.2:1 */
+        --coo-border: rgba(255, 255, 255, 0.12);
+        --coo-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+    }
+}
+#MainMenu, footer, [data-testid="stAppDeployButton"] { visibility: hidden; }
+.block-container { padding-top: 4rem; max-width: 1400px; }
+
+.coo-header { margin: 0 0 1.25rem 0; animation: coo-fade var(--coo-dur) ease-out; }
+.coo-title { font-size: 1.85rem; font-weight: 750; letter-spacing: -0.02em; line-height: 1.2; margin: 0; }
+.coo-title .hl { color: var(--coo-accent); }
+.coo-sub { color: var(--coo-muted); font-size: 0.95rem; margin-top: 0.3rem; }
+.coo-step { font-size: 0.78rem; font-weight: 650; letter-spacing: 0.06em; text-transform: uppercase;
+            color: var(--coo-muted); margin-bottom: 0.35rem; }
+.coo-hint { color: var(--coo-muted); font-size: 0.86rem; }
+
+/* Thẻ (container border=True): bo góc + đổ bóng nhẹ */
+/* (Nếu Streamlit đổi tên lớp, thẻ chỉ mất bóng, không vỡ bố cục.) */
+.st-key-coo_upload, .st-key-coo_action, .st-key-coo_results {
+    border-radius: var(--coo-radius) !important; box-shadow: var(--coo-shadow);
+    animation: coo-fade var(--coo-dur) ease-out;
+}
+
+/* Nút: nút chính màu thương hiệu, hiệu ứng hover/press nhẹ */
+button[kind="primary"], [data-testid="stBaseButton-primary"] {
+    background-color: var(--coo-btn) !important; border-color: var(--coo-btn) !important; color: #FFFFFF !important;
+}
+button[kind="primary"]:hover:not(:disabled), [data-testid="stBaseButton-primary"]:hover:not(:disabled) {
+    background-color: var(--coo-btn-hover) !important; border-color: var(--coo-btn-hover) !important;
+}
+button[kind="primary"]:disabled, [data-testid="stBaseButton-primary"]:disabled {
+    opacity: 0.45; cursor: not-allowed;
+}
+.stButton button, .stDownloadButton button {
+    border-radius: 10px !important; font-weight: 600 !important; min-height: 44px;
+    transition: transform var(--coo-dur) ease, box-shadow var(--coo-dur) ease, background-color var(--coo-dur) ease;
+}
+.stButton button:hover:not(:disabled), .stDownloadButton button:hover:not(:disabled) {
+    transform: translateY(-1px); box-shadow: var(--coo-shadow);
+}
+.stButton button:active:not(:disabled), .stDownloadButton button:active:not(:disabled) { transform: translateY(0) scale(0.98); }
+
+[data-testid="stMetric"] { border: 1px solid var(--coo-border); border-radius: 12px; padding: 0.7rem 0.9rem;
+                           animation: coo-fade var(--coo-dur) ease-out; }
+[data-testid="stMetricLabel"] p { color: var(--coo-muted); }
+
+@keyframes coo-fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+</style>
+"""
+
+STATUS_OK, STATUS_WARN, STATUS_ERR = "✅ Thành công", "⚠️ Cảnh báo", "❌ Lỗi"
+NUMERIC_EXPORT_COLS = ["Item Number", "Quantity - Box 9", "Quantity - Box 7", "USD",
+                       "IMPORTING COUNTRY HS CODE", "EXPORTING COUNTRY HS CODE", "CARTON"]
+
+
 def init_session_state():
-    if "session_id" not in st.session_state: 
-        st.session_state.session_id = str(uuid.uuid4()) # Tạo ID phiên làm việc ngẫu nhiên
-    if "has_recorded_access" not in st.session_state: 
-        st.session_state.has_recorded_access = False
-    if "pdf_files" not in st.session_state: st.session_state.pdf_files = []
-    if "is_processing" not in st.session_state: st.session_state.is_processing = False
-    if "extracted_data" not in st.session_state: st.session_state.extracted_data = None
-    if "errors" not in st.session_state: st.session_state.errors = []
-    if "scanned_files_detected" not in st.session_state: st.session_state.scanned_files_detected = []
+    defaults = {
+        "session_id": str(uuid.uuid4()),
+        "has_recorded_access": False,
+        "pdf_files": [],
+        "is_processing": False,
+        "extracted_data": None,
+        "errors": [],
+        "file_status": [],
+        "excel_bytes": None,
+        "run_seconds": 0.0,
+        "cancelled": False,
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
 
 def reset_data_state():
     st.session_state.extracted_data = None
     st.session_state.errors = []
-    st.session_state.scanned_files_detected = []
+    st.session_state.file_status = []
+    st.session_state.excel_bytes = None
+    st.session_state.run_seconds = 0.0
+
+
+def build_excel_bytes(rows):
+    """Giữ nguyên cách xuất Excel cũ (tên cột, thứ tự, kiểu số của các cột số)."""
+    df_result = pd.DataFrame(rows, columns=COLUMNS)
+    for col in NUMERIC_EXPORT_COLS:
+        if col in df_result.columns:
+            df_result[col] = df_result[col].astype(str).str.replace(',', '')
+            df_result[col] = pd.to_numeric(df_result[col], errors='coerce')
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df_result.to_excel(writer, index=False, sheet_name="C_O_FormE")
+    return output.getvalue()
+
+
+def friendly_error(raw_error):
+    """Đổi thông báo kỹ thuật thành lý do ngắn + hướng xử lý."""
+    msg = str(raw_error or "")
+    low = msg.lower()
+    if "tesseract" in low and ("not installed" in low or "not in your path" in low or "notfound" in low):
+        return "Máy chủ chưa có Tesseract OCR → cài Tesseract hoặc đặt biến môi trường TESSERACT_CMD rồi chạy lại."
+    if "password" in low or "encrypt" in low:
+        return "File PDF có mật khẩu → mở khóa file rồi tải lên lại."
+    if "no /root" in low or "eof" in low or "pdfsyntax" in low or "cannot open" in low or "broken" in low:
+        return "File PDF bị hỏng hoặc tải lên chưa trọn → mở và lưu lại bằng trình đọc PDF rồi thử lại."
+    if "index out of range" in low or "nonetype" in low:
+        return "Bố cục không giống mẫu C/O Form D/E/AI → kiểm tra đúng loại chứng từ; nếu đúng, gửi file cho bộ phận kỹ thuật."
+    detail = msg.split("Lỗi trích xuất - ", 1)[-1]
+    return f"Không đọc được file ({detail[:120]}) → kiểm tra file có đúng mẫu C/O và không bị scan quá mờ."
+
+
+def summarize_result(result):
+    """Chuyển kết quả của process_single_pdf thành 1 dòng trạng thái cho bảng tiến độ."""
+    warnings = result.get("warnings") or []
+    if result.get("error"):
+        status, note = STATUS_ERR, friendly_error(result["error"])
+    elif not result.get("data"):
+        status, note = STATUS_ERR, "Không tìm thấy dòng hàng nào → kiểm tra file có đúng mẫu C/O."
+    elif warnings:
+        status = STATUS_WARN
+        note = warnings[0] if len(warnings) == 1 else f"{warnings[0]} (+{len(warnings) - 1} cảnh báo khác)"
+    else:
+        status, note = STATUS_OK, ""
+    return {
+        "Tệp": result.get("file_name", ""),
+        "Loại": "Scan (OCR)" if result.get("scanned") else "Text",
+        "Trạng thái": status,
+        "Số dòng": len(result.get("data") or []),
+        "Ghi chú": note,
+        "Chi tiết cảnh báo": "\n".join(warnings),
+    }
+
+
+def status_frame(rows, sort=True):
+    df = pd.DataFrame(rows, columns=["Tệp", "Loại", "Trạng thái", "Số dòng", "Ghi chú", "Chi tiết cảnh báo"])
+    order = {STATUS_ERR: 0, STATUS_WARN: 1, STATUS_OK: 2}
+    if sort and not df.empty:
+        df = df.sort_values("Trạng thái", key=lambda s: s.map(order), kind="stable").reset_index(drop=True)
+    return df
+
+
+STATUS_COLUMN_CONFIG = {
+    "Tệp": st.column_config.TextColumn("Tệp", width="medium"),
+    "Loại": st.column_config.TextColumn("Loại", width="small"),
+    "Trạng thái": st.column_config.TextColumn("Trạng thái", width="small"),
+    "Số dòng": st.column_config.NumberColumn("Số dòng", width="small"),
+    "Ghi chú": st.column_config.TextColumn("Ghi chú (lý do & hướng xử lý)", width="large"),
+    "Chi tiết cảnh báo": None,   # ẩn trên bảng, vẫn có trong dữ liệu
+}
+
+
+def render_header():
+    st.markdown(APP_CSS, unsafe_allow_html=True)
+    st.markdown(
+        """
+        <div class="coo-header">
+            <p class="coo-title"><span class="hl">PDF</span> Extract to <span class="hl">Excel</span> Pipeline</p>
+            <div class="coo-sub">Hệ thống trích xuất PDF tự động (Hỗ trợ cả file Scan) · C/O Form D, E, AI</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_upload_card():
+    with st.container(border=True, key="coo_upload"):
+        st.markdown('<div class="coo-step">Bước 1 · Nguồn dữ liệu PDF</div>', unsafe_allow_html=True)
+        uploaded_files = st.file_uploader(
+            "Kéo thả File vào đây", type=["pdf"], accept_multiple_files=True,
+            disabled=st.session_state.is_processing,
+        )
+        st.session_state.pdf_files = uploaded_files or []
+        count = len(st.session_state.pdf_files)
+        if count:
+            total_mb = sum(getattr(f, "size", 0) or 0 for f in st.session_state.pdf_files) / (1024 * 1024)
+            st.markdown(f'<div class="coo-hint">Đã tải lên: <b>{count} file</b> · {total_mb:.1f} MB</div>',
+                        unsafe_allow_html=True)
+        else:
+            st.markdown('<div class="coo-hint">Đã tải lên: 0 file · Chọn nhiều file cùng lúc bằng Ctrl/Shift.</div>',
+                        unsafe_allow_html=True)
+
+
+def render_action_card():
+    """Hành động chính duy nhất: Bắt đầu trích xuất (trở thành nút phụ khi đã có kết quả)."""
+    has_files = len(st.session_state.pdf_files) > 0
+    has_results = st.session_state.extracted_data is not None
+    with st.container(border=True, key="coo_action"):
+        st.markdown('<div class="coo-step">Bước 2 · Trích xuất</div>', unsafe_allow_html=True)
+        label = "Trích xuất lại" if has_results else "🚀 BẮT ĐẦU TRÍCH XUẤT"
+        start = st.button(
+            label, type="secondary" if has_results else "primary", width="stretch",
+            disabled=not has_files or st.session_state.is_processing,
+        )
+        if not has_files:
+            st.markdown('<div class="coo-hint">Tải PDF lên ở Bước 1 để bắt đầu.</div>', unsafe_allow_html=True)
+        elif has_results:
+            st.markdown('<div class="coo-hint">Đã có kết quả bên dưới. Bấm “Trích xuất lại” nếu bạn đổi danh sách file.</div>',
+                        unsafe_allow_html=True)
+        else:
+            st.markdown(f'<div class="coo-hint">Sẵn sàng xử lý {len(st.session_state.pdf_files)} file. '
+                        'File scan dùng OCR nên chậm hơn file có text.</div>', unsafe_allow_html=True)
+    if start:
+        record_file_processing(st.session_state.session_id, len(st.session_state.pdf_files))
+        reset_data_state()
+        st.session_state.cancelled = False
+        st.session_state.is_processing = True
+        st.rerun()
+
+
+def run_extraction():
+    """Chạy trích xuất từng file, hiển thị tiến độ + trạng thái từng file theo thời gian thực."""
+    files = [{"name": f.name, "bytes": f.getvalue()} for f in st.session_state.pdf_files]
+    total = len(files)
+    all_rows, errors, statuses = [], [], []
+    started = time.time()
+
+    with st.status(f"Đang trích xuất 0/{total} file…", expanded=True) as status_box:
+        st.button("Dừng", key="cancel_run", on_click=_cancel_run)
+        progress = st.progress(0.0)
+        current = st.empty()
+        live_table = st.empty()
+        for idx, f_data in enumerate(files, start=1):
+            current.markdown(f'<div class="coo-hint">Đang xử lý: <b>{f_data["name"]}</b></div>', unsafe_allow_html=True)
+            result = process_single_pdf(f_data)
+            if result["error"]:
+                errors.append(result["error"])
+            else:
+                all_rows.extend(result["data"])
+            statuses.append(summarize_result(result))
+
+            elapsed = time.time() - started
+            eta = elapsed / idx * (total - idx)
+            progress.progress(idx / total, text=f"{idx}/{total} file · còn khoảng {int(eta // 60)} phút {int(eta % 60)} giây")
+            status_box.update(label=f"Đang trích xuất {idx}/{total} file…", expanded=True)
+            live_table.dataframe(status_frame(statuses[-8:][::-1], sort=False), hide_index=True, width="stretch",
+                                 column_config=STATUS_COLUMN_CONFIG)
+            del result
+            gc.collect()
+        current.empty()
+        status_box.update(label=f"Hoàn tất {total} file trong {time.time() - started:.0f} giây", state="complete",
+                          expanded=False)
+
+    st.session_state.extracted_data = all_rows
+    st.session_state.errors = errors
+    st.session_state.file_status = statuses
+    st.session_state.excel_bytes = build_excel_bytes(all_rows) if all_rows else None
+    st.session_state.run_seconds = time.time() - started
+    st.session_state.is_processing = False
+    st.rerun()
+
+
+def _cancel_run():
+    # Bấm "Dừng" khiến Streamlit ngắt lượt chạy hiện tại; callback này chạy trước lượt chạy mới.
+    st.session_state.is_processing = False
+    st.session_state.cancelled = True
+    reset_data_state()
+
+
+def render_results():
+    rows = st.session_state.extracted_data
+    statuses = st.session_state.file_status
+    n_ok = sum(1 for s in statuses if s["Trạng thái"] == STATUS_OK)
+    n_warn = sum(1 for s in statuses if s["Trạng thái"] == STATUS_WARN)
+    n_err = sum(1 for s in statuses if s["Trạng thái"] == STATUS_ERR)
+
+    with st.container(border=True, key="coo_results"):
+        st.markdown('<div class="coo-step">Bước 3 · Kết quả & xuất file</div>', unsafe_allow_html=True)
+        c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1, 1.6], vertical_alignment="bottom")
+        c1.metric("Thành công", n_ok)
+        c2.metric("Cảnh báo", n_warn)
+        c3.metric("Lỗi", n_err)
+        c4.metric("Dòng dữ liệu", len(rows))
+        with c5:
+            if st.session_state.excel_bytes:
+                st.download_button(
+                    label="📥 TẢI FILE EXCEL (.XLSX)", data=st.session_state.excel_bytes,
+                    file_name="Decathlon_Data.xlsx", type="primary", width="stretch",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            else:
+                st.button("📥 TẢI FILE EXCEL", disabled=True, width="stretch")
+            st.markdown(f'<div class="coo-hint">Xử lý {len(statuses)} file trong {st.session_state.run_seconds:.0f} giây.</div>',
+                        unsafe_allow_html=True)
+
+        if n_err:
+            st.error(f"{n_err} file không trích xuất được. Xem cột “Ghi chú” trong tab Trạng thái để biết lý do và cách xử lý.")
+        elif n_warn:
+            st.warning(f"{n_warn} file có ô cần kiểm tra lại (để trống hoặc lấy giá trị thay thế). Xem tab Trạng thái.")
+
+        status_tab = f"Trạng thái từng file ({len(statuses)})"
+        data_tab = f"Dữ liệu chi tiết ({len(rows)} dòng)"
+        tab_names = [status_tab, data_tab] if (n_err or n_warn) else [data_tab, status_tab]
+        tabs = dict(zip(tab_names, st.tabs(tab_names)))
+        with tabs[status_tab]:
+            df_status = status_frame(statuses)
+            st.dataframe(df_status, hide_index=True, width="stretch", column_config=STATUS_COLUMN_CONFIG,
+                         height=min(420, 38 + 35 * max(len(df_status), 1)))
+            warn_rows = [s for s in statuses if s["Chi tiết cảnh báo"]]
+            if warn_rows:
+                with st.expander("Xem toàn bộ cảnh báo"):
+                    for s in warn_rows:
+                        st.markdown(f"**{s['Tệp']}**")
+                        st.text(s["Chi tiết cảnh báo"])
+        with tabs[data_tab]:
+            if rows:
+                st.dataframe(pd.DataFrame(rows, columns=COLUMNS), width="stretch", height=450)
+            else:
+                st.info("Chưa có dòng dữ liệu nào. Kiểm tra tab Trạng thái để biết lý do.")
+
 
 def main():
-    st.set_page_config(page_title="Form E Extractor", layout="wide", page_icon="📑")
+    st.set_page_config(page_title="PDF Extract to Excel", layout="wide", page_icon="📑")
     init_session_state()
-    
+
     # Ghi nhận ngay khi truy cập web lần đầu trong phiên
     if not st.session_state.has_recorded_access:
         record_access(st.session_state.session_id)
         st.session_state.has_recorded_access = True
-    
-    st.markdown(f"""
-        <style>
-        .stApp {{ background-color: {BG_LIGHT}; font-family: 'Inter', sans-serif; }}
-        #MainMenu, footer, header {{ visibility: hidden; }}
-        .app-header {{ padding: 1.5rem 0 2rem 0; text-align: center; }}
-        .app-title {{ color: {DECATHLON_DARK}; font-weight: 800; font-size: 2.5rem; letter-spacing: -1px; margin-bottom: 0.5rem; }}
-        .highlight {{ color: {DECATHLON_BLUE}; }}
-        .control-panel {{ background: white; padding: 2rem; border-radius: 16px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05); border: 1px solid #E5E7EB; margin-bottom: 2rem; }}
-        button[kind="primary"] {{ background-color: {DECATHLON_BLUE}; color: white; border: none; height: 48px !important; border-radius: 8px !important; font-weight: 600 !important; width: 100% !important; }}
-        button[kind="primary"]:disabled {{ background-color: #D1D5DB; color: #9CA3AF; }}
-        button[kind="secondary"] {{ border: 1px solid #D1D5DB; height: 48px !important; border-radius: 8px !important; font-weight: 600 !important; width: 100% !important; }}
-        .stProgress > div > div > div > div {{ background-color: {DECATHLON_BLUE}; border-radius: 10px; height: 8px; }}
-        .data-card {{ background: white; padding: 1.5rem; border-radius: 16px; border: 1px solid #E5E7EB; }}
-        .badge {{ display: inline-block; padding: 0.35rem 0.8rem; font-size: 0.85rem; font-weight: 600; border-radius: 9999px; background-color: #E0F2FE; color: #0369A1; margin-bottom: 1rem; }}
-        </style>
-    """, unsafe_allow_html=True)
 
-    st.markdown(f"""
-        <div class="app-header">
-            <h1 style="font-size: 3.5rem; margin-bottom: 0;">📑➔📊</h1>
-            <div class="app-title"><span class="highlight">PDF</span> Extract to <span class="highlight">Excel</span> Pipeline</div>
-            <div style="color: #6B7280;">Hệ thống trích xuất PDF tự động (Hỗ trợ cả file Scan)</div>
-        </div>
-    """, unsafe_allow_html=True)
+    render_header()
+    left, right = st.columns([3, 2], gap="large")
+    with left:
+        render_upload_card()
+    with right:
+        render_action_card()
 
-    with st.container():
-        st.markdown('<div class="control-panel">', unsafe_allow_html=True)
-        st.markdown("<div class='badge'>⚙️ BẢNG ĐIỀU KHIỂN</div>", unsafe_allow_html=True)
-        
-        col1, col2, col3 = st.columns(3, gap="large")
-        cancel_clicked = False
+    if st.session_state.cancelled:
+        st.info("Đã dừng trích xuất. Kết quả dở dang đã được bỏ qua – bấm “Bắt đầu trích xuất” để chạy lại.")
+        st.session_state.cancelled = False
 
-        with col1:
-            st.markdown("**1. Nguồn dữ liệu PDF**")
-            uploaded_files = st.file_uploader("Kéo thả File vào đây", type=["pdf"], accept_multiple_files=True, disabled=st.session_state.is_processing)
-            if uploaded_files:
-                st.session_state.pdf_files = uploaded_files
-                
-                file_count = len(st.session_state.pdf_files)
-                st.markdown(f"<p style='color: #059669; font-weight: 600; margin-bottom: 0.5rem;'>✅ Đã tải lên: {file_count} file</p>", unsafe_allow_html=True)
-                
-                with st.expander("🛠️ Quản lý tệp (Bấm để xem)", expanded=True):
-                    with st.container(height=200):
-                        for f in st.session_state.pdf_files: st.markdown(f"📄 `{f.name}`")
-            else: 
-                st.session_state.pdf_files = []
-                st.markdown(f"<p style='color: #6B7280; font-weight: 600; margin-bottom: 0.5rem;'>📁 Đã tải lên: 0 file</p>", unsafe_allow_html=True)
+    if st.session_state.is_processing:
+        run_extraction()
+    elif st.session_state.extracted_data is not None:
+        render_results()
 
-        with col2:
-            st.markdown("**2. Quá trình xử lý**")
-            has_files = len(st.session_state.pdf_files) > 0
-            if has_files:
-                if not st.session_state.is_processing:
-                    if st.button("🚀 BẮT ĐẦU TRÍCH XUẤT", type="primary"):
-                        record_file_processing(st.session_state.session_id, len(st.session_state.pdf_files))
-                        st.session_state.is_processing = True
-                        reset_data_state()
-                        st.rerun()
-                else:
-                    if st.button("🛑 Hủy tiến trình", type="secondary"): cancel_clicked = True
-            else:
-                st.button("🚀 BẮT ĐẦU TRÍCH XUẤT", type="primary", disabled=True)
-
-        with col3:
-            st.markdown("**3. Xuất kết quả**")
-            if st.session_state.extracted_data is not None:
-                df_result = pd.DataFrame(st.session_state.extracted_data, columns=COLUMNS)
-                numeric_cols = ["Item Number", "Quantity - Box 9", "Quantity - Box 7", "USD", "IMPORTING COUNTRY HS CODE", "EXPORTING COUNTRY HS CODE", "CARTON"]
-                for col in numeric_cols:
-                    if col in df_result.columns:
-                        df_result[col] = df_result[col].astype(str).str.replace(',', '')
-                        df_result[col] = pd.to_numeric(df_result[col], errors='coerce')
-                
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                    df_result.to_excel(writer, index=False, sheet_name="C_O_FormE")
-                
-                st.download_button(label="📥 TẢI FILE EXCEL (.XLSX)", data=output.getvalue(), file_name="Decathlon_Data.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
-            else: st.button("📥 TẢI FILE EXCEL", disabled=True)
-
-        if cancel_clicked:
-            countdown = st.empty()
-            for i in range(3, 0, -1):
-                countdown.error(f"⚠️ Đã ngắt tiến trình. Đang dọn dẹp... {i}s")
-                time.sleep(1)
-            reset_data_state()
-            st.session_state.is_processing = False
-            st.session_state.pdf_files = []
-            st.rerun()
-            
-        elif st.session_state.is_processing:
-            st.markdown("<hr>", unsafe_allow_html=True)
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            all_extracted_data = []
-            errors = []
-            total_files = len(st.session_state.pdf_files)
-            
-            safe_file_list = [{"name": f.name, "bytes": f.getvalue()} for f in st.session_state.pdf_files]
-            
-            processed_count = 0
-            for f_data in safe_file_list:
-                processed_count += 1
-                result = process_single_pdf(f_data)
-                
-                if result["error"]: errors.append(result["error"])
-                else: all_extracted_data.extend(result["data"])
-                
-                progress_bar.progress(processed_count / total_files)
-                status_text.info(f"⏳ Đã xử lý: `{result['file_name']}` ({processed_count}/{total_files})")
-                
-                del result
-                gc.collect()
-
-            st.session_state.extracted_data = all_extracted_data
-            st.session_state.errors = errors
-            st.session_state.is_processing = False
-            st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True) 
-
-    if st.session_state.extracted_data is not None:
-        if st.session_state.scanned_files_detected:
-            st.info("ℹ️ **Hệ thống đã nhận diện và áp dụng thuật toán ĐẶC BIỆT cho các file SCAN sau:**\n\n" + 
-                    "\n".join([f"- {f}" for f in st.session_state.scanned_files_detected]))
-
-        if st.session_state.errors:
-            with st.expander("⚠️ Có lỗi xảy ra (Click để xem chi tiết)"):
-                for err in st.session_state.errors: st.error(err)
-
-        if st.session_state.extracted_data:
-            st.markdown('<div class="data-card">', unsafe_allow_html=True)
-            st.markdown(f"#### 📊 Dữ liệu chi tiết ({len(st.session_state.extracted_data)} dòng)")
-            df_result = pd.DataFrame(st.session_state.extracted_data, columns=COLUMNS)
-            st.dataframe(df_result, width='stretch', height=450)
-            st.markdown('</div>', unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
