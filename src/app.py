@@ -224,10 +224,10 @@ def locate_box11_countries(label_words, value_words):
         lbl_imp = _first_label(label_words, BOX11_IMPORTING_RE, min_top=lbl_exp['bottom'])
         exported_to = _value_line_below(lbl_exp, lbl_imp, value_words)
 
-    if not lbl_prod: warnings.append("Box 11: không tìm thấy nhãn 'produced in' → để trống Produced in")
-    elif not produced_in: warnings.append("Box 11: không đọc được tên nước dưới nhãn 'produced in' → để trống Produced in")
-    if not lbl_exp: warnings.append("Box 11: không tìm thấy nhãn 'goods exported to' → để trống Exported to")
-    elif not exported_to: warnings.append("Box 11: không đọc được tên nước dưới nhãn 'exported to' → để trống Exported to")
+    if not lbl_prod: warnings.append("Box 11: label 'produced in' not found → Produced in left blank")
+    elif not produced_in: warnings.append("Box 11: could not read the country under 'produced in' → Produced in left blank")
+    if not lbl_exp: warnings.append("Box 11: label 'goods exported to' not found → Exported to left blank")
+    elif not exported_to: warnings.append("Box 11: could not read the country under 'exported to' → Exported to left blank")
     return produced_in, exported_to, warnings
 
 def extract_box11_countries_textlayer(page):
@@ -242,7 +242,7 @@ def extract_box11_countries_textlayer(page):
             img = region.to_image(resolution=200).original
             label_words = _ocr_words_from_image(img, 72 / 200, bbox[0], bbox[1])
         except Exception as e:
-            return "", "", [f"Box 11: lỗi OCR khi tìm nhãn ({e}) → để trống Produced in / Exported to"]
+            return "", "", [f"Box 11: OCR error while locating the labels ({e}) → Produced in / Exported to left blank"]
     produced_in, exported_to, warnings = locate_box11_countries(label_words, text_words)
     # Nếu tên nước không có trong text layer (vd. đóng dấu/viết tay) thì đọc giá trị từ OCR
     if (not produced_in or not exported_to) and label_words is not text_words:
@@ -266,7 +266,7 @@ def _snap_ocr_country(value, field, warnings):
     if value in KNOWN_COUNTRIES: return value
     match = difflib.get_close_matches(value, KNOWN_COUNTRIES, n=1, cutoff=0.8)
     if match: return match[0]
-    warnings.append(f"Box 11: {field} = '{value}' (đọc bằng OCR, không có trong danh sách nước) – vui lòng kiểm tra")
+    warnings.append(f"Box 11: {field} = '{value}' (read by OCR, not in the country list) – please verify")
     return value
 
 def extract_box11_countries_scanned(fitz_page, zoom=300 / 72):
@@ -689,7 +689,7 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
                 produced_in, exported_to, box11_warn = extract_box11_countries_scanned(doc[-1])
                 file_warnings.extend(box11_warn)
             except Exception as e:
-                file_warnings.append(f"Box 11: lỗi OCR ({e}) → để trống Produced in / Exported to")
+                file_warnings.append(f"Box 11: OCR error ({e}) → Produced in / Exported to left blank")
         else:
             prod_match = re.search(r'([A-Za-z\s]+)\s*\(Country\)', top_flat, re.IGNORECASE)
             if prod_match: produced_in = prod_match.group(1).strip().upper()
@@ -765,7 +765,7 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             "Box 13": box_13_str, "Third party": third_party_val,
         })
         extracted_data.append(error_row)
-        file_warnings.append("Không tìm thấy dòng hàng (N/M) bằng OCR – kiểm tra chất lượng bản scan")
+        file_warnings.append("No item rows (N/M) found by OCR – check the scan quality")
     else:
         for i in range(len(matches)):
             start = matches[i].start()
@@ -913,7 +913,7 @@ def process_scanned_pdf(pdf, file_bytes, file_name):
             # Box 7 không ghi số lượng -> lấy theo Box 9 (sau khi đã làm sạch mô tả, không ảnh hưởng cột E)
             if not (qty_box7 and uom_box7) and BOX7_FALLBACK_TO_BOX9 and qty and uom:
                 qty_box7, uom_box7 = qty, uom
-                file_warnings.append(f"Item {item_no}: Box 7 không ghi số lượng → Quantity/UOM - Box 7 lấy theo Box 9 ({qty} {uom})")
+                file_warnings.append(f"Item {item_no}: Box 7 shows no quantity → Quantity/UOM - Box 7 taken from Box 9 ({qty} {uom})")
 
             date_inv = normalize_date(date_inv)
 
@@ -1018,7 +1018,7 @@ def extract_global_info(page_first, page_last):
         produced_in, exported_to, warnings = extract_box11_countries_textlayer(page_last)
     except Exception as e:
         produced_in, exported_to = "", ""
-        warnings = [f"Box 11: lỗi khi đọc ({e}) → để trống Produced in / Exported to"]
+        warnings = [f"Box 11: read error ({e}) → Produced in / Exported to left blank"]
 
     if form_type == "E" and not (produced_in and exported_to):
         # Giữ nguyên cách cũ cho Form E khi không định vị được nhãn (Form E đang đúng với cách này)
@@ -1168,6 +1168,8 @@ def extract_table_items(pdf):
     clean_tp = re.sub(r'(?i)^(Third\s+Party\s+Invoicing\s+by\s*[:;]?|Third\s+Party\s*[:;]?|Third\s+Country\s*[:;]?)', '', raw_tp).strip()
     return items, global_invoice, clean_tp
 
+EXTRACTION_ERROR_PREFIX = "Extraction error - "
+
 def process_single_pdf(file_data):
     file_name = file_data["name"]
     file_bytes = file_data["bytes"]
@@ -1266,57 +1268,106 @@ def process_single_pdf(file_data):
                     COLUMNS[26]: third_party_column_val
                 })
     except Exception as e:
-        return {"error": f"{file_name}: Lỗi trích xuất - {str(e)}", "data": [], "file_name": file_name,
+        return {"error": f"{file_name}: {EXTRACTION_ERROR_PREFIX}{str(e)}", "data": [], "file_name": file_name,
                 "warnings": [], "scanned": False}
     return {"error": None, "data": extracted_data, "file_name": file_name,
             "warnings": global_info.get("warnings", []), "scanned": False}
 
 # ==========================================
-# 4. GIAO DIỆN STREAMLIT (chỉ trình bày & luồng tương tác – không chứa logic trích xuất)
+# 4. STREAMLIT UI (presentation and interaction only - no extraction logic lives here)
 # ==========================================
 APP_CSS = """
 <style>
 :root {
-    --coo-accent: #006BA6;          /* chữ nhấn trên nền sáng: tương phản 5.6:1 */
-    --coo-btn: #0073AE;             /* nền nút chính, chữ trắng: tương phản 5.0:1 */
+    /* Brand palette derived from DECATHLON_BLUE (#0082C3); darker steps are used for text/buttons to reach WCAG AA */
+    --coo-brand: #0082C3;
+    --coo-btn: #0073AE;             /* primary button background, white text: 5.0:1 */
     --coo-btn-hover: #005E8F;
-    --coo-muted: #5B6472;           /* chữ phụ trên nền sáng: 6.1:1 */
+    --coo-accent: #006BA6;          /* brand text on light background: 5.6:1 */
+    --coo-ink: #0F1B2D;             /* headline text */
+    --coo-muted: #5B6472;           /* secondary text on light background: 6.1:1 */
     --coo-border: rgba(15, 23, 42, 0.10);
     --coo-shadow: 0 1px 2px rgba(15, 23, 42, 0.05), 0 6px 16px rgba(15, 23, 42, 0.05);
     --coo-radius: 14px;
     --coo-dur: 180ms;
     --coo-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
     --coo-hover: rgba(15, 23, 42, 0.04);
-    /* Màu trạng thái (nền nhạt + chữ đậm, tương phản >= 6:1) */
+    /* Status colours (tinted background + strong text, contrast >= 6:1) */
     --coo-ok: #188038;       --coo-ok-fg: #FFFFFF;  --coo-ok-bg: #E6F4EA;   --coo-ok-text: #0D652D;  --coo-ok-line: rgba(24, 128, 56, 0.28);
-    --coo-warn-bg: #FEF3D6;  --coo-warn-text: #7A4B00;
-    --coo-err-bg: #FCE8E6;   --coo-err-text: #A50E0E;
+    --coo-warn-bg: #FEF3D6;  --coo-warn-text: #7A4B00;  --coo-warn-line: rgba(176, 108, 0, 0.30);
+    --coo-err-bg: #FCE8E6;   --coo-err-text: #A50E0E;   --coo-err-line: rgba(197, 34, 31, 0.28);
+    --coo-info-bg: #E8F3FB;  --coo-info-text: #0B4F7A;  --coo-info-line: rgba(0, 115, 174, 0.28);
     --coo-new-bg: rgba(15, 23, 42, 0.07); --coo-new-text: #47505E;
 }
 @media (prefers-color-scheme: dark) {
     :root {
-        --coo-accent: #5CC0F2;      /* trên nền tối #0E1117: 9.1:1 */
-        --coo-muted: #A3ACB9;       /* trên nền tối: 8.2:1 */
+        --coo-accent: #5CC0F2;      /* on dark background #0E1117: 9.1:1 */
+        --coo-ink: #F3F6FA;
+        --coo-muted: #A3ACB9;       /* on dark background: 8.2:1 */
         --coo-border: rgba(255, 255, 255, 0.12);
         --coo-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
         --coo-hover: rgba(255, 255, 255, 0.05);
         --coo-ok: #34C759;       --coo-ok-fg: #06250F;  --coo-ok-bg: rgba(52, 199, 89, 0.13);  --coo-ok-text: #86E3A1;  --coo-ok-line: rgba(52, 199, 89, 0.38);
-        --coo-warn-bg: rgba(255, 204, 0, 0.16);  --coo-warn-text: #FFD666;
-        --coo-err-bg: rgba(255, 69, 58, 0.18);   --coo-err-text: #FF9F97;
+        --coo-warn-bg: rgba(255, 204, 0, 0.16);  --coo-warn-text: #FFD666;  --coo-warn-line: rgba(255, 204, 0, 0.35);
+        --coo-err-bg: rgba(255, 69, 58, 0.18);   --coo-err-text: #FF9F97;   --coo-err-line: rgba(255, 69, 58, 0.40);
+        --coo-info-bg: rgba(92, 192, 242, 0.12); --coo-info-text: #A9DCF7;  --coo-info-line: rgba(92, 192, 242, 0.35);
         --coo-new-bg: rgba(255, 255, 255, 0.10); --coo-new-text: #C3CAD4;
     }
 }
 #MainMenu, footer, [data-testid="stAppDeployButton"] { visibility: hidden; }
-.block-container { padding-top: 4rem; max-width: 1400px; }
+.block-container { padding-top: 3.5rem; padding-bottom: 6rem; max-width: 1400px; }
 
-.coo-header { margin: 0 0 1.5rem 0; animation: coo-fade 240ms var(--coo-ease); }
-.coo-title { font-size: 2rem; font-weight: 750; letter-spacing: -0.025em; line-height: 1.2; margin: 0; }
+/* ---- Layout safety: the page itself must always scroll through ALL content ----
+   Streamlit lays the page out as nested flex columns. If the page column is ever sized to the
+   viewport, its children shrink and the bottom of the results gets cut off with nothing to scroll to.
+   These rules keep every vertical stack at its natural height (no-ops when the layout is already right). */
+[data-testid="stMainBlockContainer"],
+[data-testid="stMainBlockContainer"] > [data-testid="stVerticalBlock"] {
+    flex-shrink: 0 !important; min-height: auto !important; height: auto !important; max-height: none !important;
+    overflow: visible !important;
+}
+[data-testid="stMainBlockContainer"] [data-testid="stVerticalBlock"] > * { flex-shrink: 0 !important; }
+.st-key-coo_upload, .st-key-coo_action, .st-key-coo_reset, .st-key-coo_progress, .st-key-coo_results {
+    height: auto !important; max-height: none !important; overflow: visible !important;
+}
+
+/* Custom HTML blocks: Streamlit pulls every markdown block up by 1rem (meant for <p> margins).
+   Our blocks are <div>s, so cancel that pull - otherwise text overlaps the card border below it. */
+[data-testid="stMarkdownContainer"]:has(> [class^="coo-"]:last-child) { margin-bottom: 0 !important; }
+
+/* ---- Header ---- */
+.coo-hero { display: flex; align-items: center; gap: 1rem; margin: 0 0 0.9rem 0; animation: coo-rise 420ms var(--coo-ease) both; }
+.coo-logo { flex: none; width: 58px; height: 58px; border-radius: 16px; display: grid; place-items: center; color: #FFFFFF;
+            background: linear-gradient(135deg, #0A9BE4 0%, #0073AE 55%, #00527F 100%);
+            box-shadow: 0 8px 20px rgba(0, 115, 174, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.25); }
+.coo-logo svg { width: 32px; height: 32px; display: block; }
+.coo-title { font-size: clamp(1.5rem, 1.05rem + 1.5vw, 2.2rem) !important; font-weight: 800 !important; line-height: 1.08 !important;
+             letter-spacing: 0.012em; text-transform: uppercase; color: var(--coo-ink); margin: 0 !important; }
 .coo-title .hl { color: var(--coo-accent); }
+.coo-title-bar { width: 64px; height: 4px; border-radius: 4px; margin-top: 0.55rem;
+                 background: linear-gradient(90deg, var(--coo-brand), rgba(0, 130, 195, 0.25));
+                 transform-origin: left center; animation: coo-grow 520ms var(--coo-ease) 120ms both; }
 
-/* --- Thanh tổng số file đã tải lên --- */
-.coo-count { display: flex; align-items: center; gap: 0.8rem; padding: 0.75rem 0.95rem; margin: 0.15rem 0 0.55rem 0;
-             border-radius: 12px; background: var(--coo-ok-bg); border: 1px solid var(--coo-ok-line);
-             animation: coo-pop 260ms var(--coo-ease); }
+/* ---- Step headers ---- */
+.coo-step { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.15rem; }
+.coo-step-num { flex: none; width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center;
+                background: var(--coo-btn); color: #FFFFFF; font-size: 0.8rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.coo-step-title { font-size: 1.02rem; font-weight: 700; color: var(--coo-ink); letter-spacing: -0.005em; }
+.coo-step.quiet .coo-step-num { background: var(--coo-new-bg); color: var(--coo-muted); }
+.coo-hint { color: var(--coo-muted); font-size: 0.86rem; line-height: 1.45; }
+
+/* ---- Cards (st.container(border=True, key=...)). If Streamlit renames the class the cards only lose their shadow. ---- */
+.st-key-coo_upload, .st-key-coo_action, .st-key-coo_reset, .st-key-coo_progress, .st-key-coo_results {
+    border-radius: var(--coo-radius) !important; box-shadow: var(--coo-shadow);
+    animation: coo-rise 360ms var(--coo-ease) both;
+    transition: box-shadow var(--coo-dur) ease;
+}
+.st-key-coo_action { animation-delay: 60ms; }
+.st-key-coo_reset { animation-delay: 120ms; }
+
+/* ---- Uploaded-files summary bar ---- */
+.coo-count { display: flex; align-items: center; gap: 0.8rem; padding: 0.75rem 0.95rem; border-radius: 12px;
+             background: var(--coo-ok-bg); border: 1px solid var(--coo-ok-line); animation: coo-pop 260ms var(--coo-ease); }
 .coo-count-icon { flex: none; width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center;
                   background: var(--coo-ok); color: var(--coo-ok-fg); font-weight: 800; font-size: 0.95rem; }
 .coo-count-main { display: flex; align-items: baseline; gap: 0.4rem; flex-wrap: wrap; min-width: 0; }
@@ -1325,12 +1376,11 @@ APP_CSS = """
 .coo-count-meta { margin-left: auto; flex: none; color: var(--coo-muted); font-size: 0.86rem; font-variant-numeric: tabular-nums; }
 .coo-count.empty { background: var(--coo-hover); border: 1px dashed var(--coo-border); animation: none; }
 .coo-count.empty .coo-count-icon { background: var(--coo-new-bg); color: var(--coo-muted); }
-.coo-count.empty .coo-count-label { font-weight: 600; }
 .coo-count.empty .coo-count-meta { margin-left: 0; display: block; margin-top: 0.1rem; }
 
-/* --- Danh sách tệp đã tải lên (cuộn trong khung, hợp với hàng trăm file) --- */
+/* ---- Uploaded-files list (scrolls inside its own frame, so hundreds of files stay manageable) ---- */
 .coo-files { max-height: 276px; overflow-y: auto; border: 1px solid var(--coo-border); border-radius: 12px;
-             scrollbar-width: thin; scroll-behavior: smooth; overscroll-behavior: contain;
+             scrollbar-width: thin; scroll-behavior: smooth;
              animation: coo-fade 220ms var(--coo-ease); }
 .coo-files:focus-visible { outline: 2px solid var(--coo-btn); outline-offset: 2px; }
 .coo-file { display: grid; grid-template-columns: 2.2rem minmax(0, 1fr) auto auto; align-items: center; column-gap: 0.65rem;
@@ -1347,65 +1397,122 @@ APP_CSS = """
 .coo-tag.ok { background: var(--coo-ok-bg); color: var(--coo-ok-text); }
 .coo-tag.warn { background: var(--coo-warn-bg); color: var(--coo-warn-text); }
 .coo-tag.err { background: var(--coo-err-bg); color: var(--coo-err-text); }
+.coo-tag.info { background: var(--coo-info-bg); color: var(--coo-info-text); }
 .coo-tag.new { background: var(--coo-new-bg); color: var(--coo-new-text); }
-.coo-note { display: flex; gap: 0.5rem; align-items: flex-start; margin-top: 0.6rem; padding: 0.55rem 0.75rem; border-radius: 10px;
-            background: var(--coo-warn-bg); color: var(--coo-warn-text); font-size: 0.86rem; }
-@media (max-width: 640px) {
-    .coo-file { grid-template-columns: 1.8rem minmax(0, 1fr) auto; }
-    .coo-file-size { display: none; }
-    .coo-count-meta { display: none; }
-}
 
-.coo-step { font-size: 0.78rem; font-weight: 650; letter-spacing: 0.06em; text-transform: uppercase;
-            color: var(--coo-muted); margin-bottom: 0.35rem; }
-.coo-hint { color: var(--coo-muted); font-size: 0.86rem; }
+/* ---- Collapsible sections: native <details>, so the browser handles open/close (no script-driven height animation
+        that could leave a section stuck at a fixed height) ---- */
+.coo-details { border: 1px solid var(--coo-border); border-radius: 12px; overflow: hidden; }
+.coo-details > summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 0.55rem; padding: 0.62rem 0.9rem;
+                         font-weight: 600; font-size: 0.92rem; user-select: none; transition: background-color var(--coo-dur) ease; }
+.coo-details > summary::-webkit-details-marker { display: none; }
+.coo-details > summary::before { content: ""; flex: none; width: 0.45rem; height: 0.45rem; margin: 0 0.2rem 0 0.1rem; opacity: 0.7;
+                                 border-right: 2px solid currentColor; border-bottom: 2px solid currentColor;
+                                 transform: rotate(-45deg); transition: transform var(--coo-dur) var(--coo-ease); }
+.coo-details[open] > summary::before { transform: rotate(45deg) translate(-1px, -1px); }
+.coo-details > summary:hover { background: var(--coo-hover); }
+.coo-details > summary:focus-visible { outline: 2px solid var(--coo-btn); outline-offset: -2px; }
+.coo-details[open] > summary { border-bottom: 1px solid var(--coo-border); }
+.coo-details[open] > :not(summary) { animation: coo-fade 240ms var(--coo-ease); }
+.coo-details .coo-files { border: 0; border-radius: 0; animation: none; }
+.coo-details-empty { padding: 0.7rem 0.9rem; }
+.coo-warn-list { max-height: 320px; overflow-y: auto; scrollbar-width: thin; padding: 0.7rem 0.9rem 0.2rem; }
+.coo-warn-file { font-weight: 650; font-size: 0.9rem; }
+.coo-warn-text { color: var(--coo-muted); font-size: 0.86rem; line-height: 1.5; margin: 0.1rem 0 0.7rem; }
 
-/* Thẻ (container border=True): bo góc + đổ bóng nhẹ */
-/* (Nếu Streamlit đổi tên lớp, thẻ chỉ mất bóng, không vỡ bố cục.) */
-.st-key-coo_upload, .st-key-coo_action, .st-key-coo_results {
-    border-radius: var(--coo-radius) !important; box-shadow: var(--coo-shadow);
-    animation: coo-fade var(--coo-dur) ease-out;
-}
+/* ---- Banners (errors, warnings, scanned-file notice) ---- */
+.coo-banner { display: flex; gap: 0.75rem; align-items: flex-start; padding: 0.8rem 1rem; border-radius: 12px;
+              font-size: 0.92rem; line-height: 1.5; border: 1px solid transparent; animation: coo-rise 320ms var(--coo-ease) both; }
+.coo-banner-icon { flex: none; width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center;
+                   font-size: 0.8rem; font-weight: 800; margin-top: 0.05rem; }
+.coo-banner-body { min-width: 0; flex: 1; }
+.coo-banner-title { font-weight: 700; }
+.coo-banner.info { background: var(--coo-info-bg); color: var(--coo-info-text); border-color: var(--coo-info-line); }
+.coo-banner.info .coo-banner-icon { background: var(--coo-info-line); }
+.coo-banner.warn { background: var(--coo-warn-bg); color: var(--coo-warn-text); border-color: var(--coo-warn-line); }
+.coo-banner.warn .coo-banner-icon { background: var(--coo-warn-line); }
+.coo-banner.err { background: var(--coo-err-bg); color: var(--coo-err-text); border-color: var(--coo-err-line); }
+.coo-banner.err .coo-banner-icon { background: var(--coo-err-line); }
+.coo-chips { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.55rem; max-height: 124px; overflow-y: auto;
+             scrollbar-width: thin; padding-right: 0.2rem; }
+.coo-chip { font-size: 0.8rem; font-weight: 600; padding: 0.16rem 0.6rem; border-radius: 999px;
+            background: var(--coo-info-line); font-variant-numeric: tabular-nums; white-space: nowrap; }
 
-/* Nút: nút chính màu thương hiệu, hiệu ứng hover/press nhẹ */
+/* ---- Progress card ---- */
+.coo-progress-head { display: flex; align-items: center; gap: 0.65rem; }
+.coo-spinner { flex: none; width: 20px; height: 20px; border-radius: 50%; border: 2.5px solid var(--coo-info-line);
+               border-top-color: var(--coo-btn); animation: coo-spin 800ms linear infinite; }
+
+/* ---- Buttons: brand primary, gentle hover/press feedback ---- */
 button[kind="primary"], [data-testid="stBaseButton-primary"] {
     background-color: var(--coo-btn) !important; border-color: var(--coo-btn) !important; color: #FFFFFF !important;
 }
 button[kind="primary"]:hover:not(:disabled), [data-testid="stBaseButton-primary"]:hover:not(:disabled) {
     background-color: var(--coo-btn-hover) !important; border-color: var(--coo-btn-hover) !important;
 }
-button[kind="primary"]:disabled, [data-testid="stBaseButton-primary"]:disabled {
-    opacity: 0.45; cursor: not-allowed;
-}
+button[kind="primary"]:disabled, [data-testid="stBaseButton-primary"]:disabled { opacity: 0.45; cursor: not-allowed; }
 .stButton button, .stDownloadButton button {
     border-radius: 10px !important; font-weight: 600 !important; min-height: 44px;
-    transition: transform var(--coo-dur) ease, box-shadow var(--coo-dur) ease, background-color var(--coo-dur) ease;
+    transition: transform var(--coo-dur) var(--coo-ease), box-shadow var(--coo-dur) ease, background-color var(--coo-dur) ease,
+                border-color var(--coo-dur) ease, opacity var(--coo-dur) ease;
 }
 .stButton button:hover:not(:disabled), .stDownloadButton button:hover:not(:disabled) {
     transform: translateY(-1px); box-shadow: var(--coo-shadow);
 }
 .stButton button:active:not(:disabled), .stDownloadButton button:active:not(:disabled) { transform: translateY(0) scale(0.98); }
+.stButton button:focus-visible, .stDownloadButton button:focus-visible { outline: 2px solid var(--coo-btn); outline-offset: 2px; }
 
 [data-testid="stMetric"] { border: 1px solid var(--coo-border); border-radius: 12px; padding: 0.7rem 0.9rem;
-                           animation: coo-fade var(--coo-dur) ease-out; }
+                           animation: coo-rise 360ms var(--coo-ease) both; transition: border-color var(--coo-dur) ease; }
+[data-testid="stMetric"]:hover { border-color: var(--coo-info-line); }
 [data-testid="stMetricLabel"] p { color: var(--coo-muted); }
 
-/* Khung xổ danh sách tệp: bo góc đồng bộ với thẻ */
-.st-key-coo_upload [data-testid="stExpander"] details { border-radius: 12px; }
-
 @keyframes coo-fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
-@keyframes coo-pop { from { opacity: 0; transform: scale(0.98); } to { opacity: 1; transform: none; } }
+@keyframes coo-rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+@keyframes coo-pop  { from { opacity: 0; transform: scale(0.98); } to { opacity: 1; transform: none; } }
+@keyframes coo-grow { from { opacity: 0; transform: scaleX(0); } to { opacity: 1; transform: scaleX(1); } }
+@keyframes coo-spin { to { transform: rotate(360deg); } }
+@media (max-width: 640px) {
+    .coo-file { grid-template-columns: 1.8rem minmax(0, 1fr) auto; }
+    .coo-file-size, .coo-count-meta { display: none; }
+    .coo-logo { width: 46px; height: 46px; border-radius: 13px; }
+    .coo-logo svg { width: 26px; height: 26px; }
+}
 @media (prefers-reduced-motion: reduce) {
-    *, *::before, *::after { animation: none !important; transition: none !important; }
+    *, *::before, *::after { animation-duration: 0.01ms !important; animation-delay: 0ms !important;
+                              animation-iteration-count: 1 !important; transition: none !important; }
 }
 </style>
 """
 
-STATUS_OK, STATUS_WARN, STATUS_ERR = "✅ Thành công", "⚠️ Cảnh báo", "❌ Lỗi"
+# Header mark: a document that contains a table (PDF in, spreadsheet out). Generic artwork - no third-party logo.
+HEADER_ICON_SVG = (
+    '<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+    'stroke-linejoin="round" aria-hidden="true">'
+    '<path d="M9 3h10l6 6v17a3 3 0 0 1-3 3H9a3 3 0 0 1-3-3V6a3 3 0 0 1 3-3z"/>'
+    '<path d="M19 3v6h6"/>'
+    '<rect x="10.5" y="14" width="11" height="10" rx="1.5"/>'
+    '<path d="M10.5 19h11M16 14v10"/>'
+    '</svg>'
+)
+
+STATUS_OK, STATUS_WARN, STATUS_ERR = "✅ Success", "⚠️ Warning", "❌ Error"
+TYPE_SCAN, TYPE_TEXT = "Scan (OCR)", "Text"
+COL_FILE, COL_TYPE, COL_STATUS, COL_ROWS, COL_NOTES, COL_DETAILS = "File", "Type", "Status", "Rows", "Notes", "All warnings"
+STATUS_COLUMNS = [COL_FILE, COL_TYPE, COL_STATUS, COL_ROWS, COL_NOTES, COL_DETAILS]
 NUMERIC_EXPORT_COLS = ["Item Number", "Quantity - Box 9", "Quantity - Box 7", "USD",
                        "IMPORTING COUNTRY HS CODE", "EXPORTING COUNTRY HS CODE", "CARTON"]
+FILE_TAGS = {STATUS_OK: ("ok", "Success"), STATUS_WARN: ("warn", "Warning"), STATUS_ERR: ("err", "Error")}
+FILE_SEARCH_MIN = 8          # show the search box once there are more files than this
+FILE_ANIMATED_ROWS = 12      # only the first rows animate in one by one, so long lists stay light
+LIVE_TABLE_ROWS = 8          # rows shown in the live table while extracting
 
 
+def _plural(n, word):
+    return f"{n} {word}" if n == 1 else f"{n} {word}s"
+
+
+# ---------- session state ----------
 def init_session_state():
     defaults = {
         "session_id": str(uuid.uuid4()),
@@ -1418,6 +1525,7 @@ def init_session_state():
         "excel_bytes": None,
         "run_seconds": 0.0,
         "cancelled": False,
+        "uploader_nonce": 0,     # bumping this gives the uploader a new key, which empties it
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -1432,8 +1540,18 @@ def reset_data_state():
     st.session_state.run_seconds = 0.0
 
 
+def reset_everything():
+    """Start over: drop every uploaded file and all results so a fresh batch can be uploaded."""
+    reset_data_state()
+    st.session_state.uploader_nonce += 1
+    st.session_state.pdf_files = []
+    st.session_state.cancelled = False
+    st.session_state.pop("coo_file_search", None)
+
+
+# ---------- helpers (pure presentation) ----------
 def build_excel_bytes(rows):
-    """Giữ nguyên cách xuất Excel cũ (tên cột, thứ tự, kiểu số của các cột số)."""
+    """Same Excel export as before (column names, order, numeric types of the numeric columns)."""
     df_result = pd.DataFrame(rows, columns=COLUMNS)
     for col in NUMERIC_EXPORT_COLS:
         if col in df_result.columns:
@@ -1446,76 +1564,59 @@ def build_excel_bytes(rows):
 
 
 def friendly_error(raw_error):
-    """Đổi thông báo kỹ thuật thành lý do ngắn + hướng xử lý."""
+    """Turn a technical error into a short reason plus what to do next."""
     msg = str(raw_error or "")
     low = msg.lower()
     if "tesseract" in low and ("not installed" in low or "not in your path" in low or "notfound" in low):
-        return "Máy chủ chưa có Tesseract OCR → cài Tesseract hoặc đặt biến môi trường TESSERACT_CMD rồi chạy lại."
+        return "Tesseract OCR is not available on the server → install Tesseract or set TESSERACT_CMD, then run again."
     if "password" in low or "encrypt" in low:
-        return "File PDF có mật khẩu → mở khóa file rồi tải lên lại."
+        return "The PDF is password-protected → remove the password and upload it again."
     if "no /root" in low or "eof" in low or "pdfsyntax" in low or "cannot open" in low or "broken" in low:
-        return "File PDF bị hỏng hoặc tải lên chưa trọn → mở và lưu lại bằng trình đọc PDF rồi thử lại."
+        return "The PDF is damaged or was not uploaded completely → open and re-save it in a PDF reader, then try again."
     if "index out of range" in low or "nonetype" in low:
-        return "Bố cục không giống mẫu C/O Form D/E/AI → kiểm tra đúng loại chứng từ; nếu đúng, gửi file cho bộ phận kỹ thuật."
-    detail = msg.split("Lỗi trích xuất - ", 1)[-1]
-    return f"Không đọc được file ({detail[:120]}) → kiểm tra file có đúng mẫu C/O và không bị scan quá mờ."
+        return "The layout does not match a C/O Form D/E/AI → check the document type; if it is correct, send the file to the technical team."
+    detail = msg.split(EXTRACTION_ERROR_PREFIX, 1)[-1]
+    return f"The file could not be read ({detail[:120]}) → check that it is a C/O form and that the scan is not too blurry."
 
 
 def summarize_result(result):
-    """Chuyển kết quả của process_single_pdf thành 1 dòng trạng thái cho bảng tiến độ."""
+    """Convert the result of process_single_pdf into one status row."""
     warnings = result.get("warnings") or []
     if result.get("error"):
         status, note = STATUS_ERR, friendly_error(result["error"])
     elif not result.get("data"):
-        status, note = STATUS_ERR, "Không tìm thấy dòng hàng nào → kiểm tra file có đúng mẫu C/O."
+        status, note = STATUS_ERR, "No item rows were found → check that the file is a C/O form."
     elif warnings:
         status = STATUS_WARN
-        note = warnings[0] if len(warnings) == 1 else f"{warnings[0]} (+{len(warnings) - 1} cảnh báo khác)"
+        note = warnings[0] if len(warnings) == 1 else f"{warnings[0]} (+{len(warnings) - 1} more)"
     else:
         status, note = STATUS_OK, ""
     return {
-        "Tệp": result.get("file_name", ""),
-        "Loại": "Scan (OCR)" if result.get("scanned") else "Text",
-        "Trạng thái": status,
-        "Số dòng": len(result.get("data") or []),
-        "Ghi chú": note,
-        "Chi tiết cảnh báo": "\n".join(warnings),
+        COL_FILE: result.get("file_name", ""),
+        COL_TYPE: TYPE_SCAN if result.get("scanned") else TYPE_TEXT,
+        COL_STATUS: status,
+        COL_ROWS: len(result.get("data") or []),
+        COL_NOTES: note,
+        COL_DETAILS: "\n".join(warnings),
     }
 
 
 def status_frame(rows, sort=True):
-    df = pd.DataFrame(rows, columns=["Tệp", "Loại", "Trạng thái", "Số dòng", "Ghi chú", "Chi tiết cảnh báo"])
+    df = pd.DataFrame(rows, columns=STATUS_COLUMNS)
     order = {STATUS_ERR: 0, STATUS_WARN: 1, STATUS_OK: 2}
     if sort and not df.empty:
-        df = df.sort_values("Trạng thái", key=lambda s: s.map(order), kind="stable").reset_index(drop=True)
+        df = df.sort_values(COL_STATUS, key=lambda s: s.map(order), kind="stable").reset_index(drop=True)
     return df
 
 
 STATUS_COLUMN_CONFIG = {
-    "Tệp": st.column_config.TextColumn("Tệp", width="medium"),
-    "Loại": st.column_config.TextColumn("Loại", width="small"),
-    "Trạng thái": st.column_config.TextColumn("Trạng thái", width="small"),
-    "Số dòng": st.column_config.NumberColumn("Số dòng", width="small"),
-    "Ghi chú": st.column_config.TextColumn("Ghi chú (lý do & hướng xử lý)", width="large"),
-    "Chi tiết cảnh báo": None,   # ẩn trên bảng, vẫn có trong dữ liệu
+    COL_FILE: st.column_config.TextColumn(COL_FILE, width="medium"),
+    COL_TYPE: st.column_config.TextColumn(COL_TYPE, width="small"),
+    COL_STATUS: st.column_config.TextColumn(COL_STATUS, width="small"),
+    COL_ROWS: st.column_config.NumberColumn(COL_ROWS, width="small"),
+    COL_NOTES: st.column_config.TextColumn("Notes (reason & what to do)", width="large"),
+    COL_DETAILS: None,   # hidden in the table, still available in the data
 }
-
-
-def render_header():
-    st.markdown(APP_CSS, unsafe_allow_html=True)
-    st.markdown(
-        """
-        <div class="coo-header">
-            <p class="coo-title"><span class="hl">PDF</span> Extract to <span class="hl">Excel</span> Pipeline</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-FILE_TAGS = {STATUS_OK: ("ok", "Thành công"), STATUS_WARN: ("warn", "Cảnh báo"), STATUS_ERR: ("err", "Lỗi")}
-FILE_SEARCH_MIN = 8          # từ bao nhiêu file thì hiện ô tìm kiếm
-FILE_ANIMATED_ROWS = 12      # chỉ các dòng đầu có hiệu ứng lần lượt, để danh sách hàng trăm file vẫn nhẹ
 
 
 def _format_size(num_bytes):
@@ -1525,20 +1626,47 @@ def _format_size(num_bytes):
     return f"{num_bytes} B"
 
 
-def _file_list_html(shown, name_counts, status_by_name, has_results):
-    """Danh sách tệp dạng HTML một khối (một dòng, không thụt lề) – nhanh kể cả với hàng trăm file."""
+def _html(markup):
+    st.markdown(markup, unsafe_allow_html=True)
+
+
+def _step_header(number, title, quiet=False):
+    _html(f'<div class="coo-step{" quiet" if quiet else ""}"><span class="coo-step-num">{number}</span>'
+          f'<span class="coo-step-title">{title}</span></div>')
+
+
+def _banner(kind, icon, title, body_html=""):
+    _html(f'<div class="coo-banner {kind}" role="status"><span class="coo-banner-icon">{icon}</span>'
+          f'<div class="coo-banner-body"><span class="coo-banner-title">{title}</span> {body_html}</div></div>')
+
+
+# ---------- header ----------
+def render_header():
+    _html(APP_CSS)
+    _html(
+        f'<div class="coo-hero"><div class="coo-logo">{HEADER_ICON_SVG}</div>'
+        '<div><div class="coo-title"><span class="hl">PDF</span> Extract to <span class="hl">Excel</span> Pipeline</div>'
+        '<div class="coo-title-bar"></div></div></div>'
+    )
+
+
+# ---------- step 1: upload ----------
+def _file_list_html(shown, name_counts, status_by_name, type_by_name, has_results):
+    """The file list as one HTML block (single line, no indentation) - fast even with hundreds of files."""
     rows = []
     for pos, (idx, f) in enumerate(shown):
         name = html_escape(f.name)
         tags = ""
+        if type_by_name.get(f.name) == TYPE_SCAN:
+            tags += '<span class="coo-tag info">Scan</span>'
         status = status_by_name.get(f.name)
         if status in FILE_TAGS:
             css_class, label = FILE_TAGS[status]
             tags += f'<span class="coo-tag {css_class}">{label}</span>'
         elif has_results:
-            tags += '<span class="coo-tag new">Chưa xử lý</span>'
+            tags += '<span class="coo-tag new">Not processed</span>'
         if name_counts[f.name] > 1:
-            tags += '<span class="coo-tag warn">Trùng tên</span>'
+            tags += '<span class="coo-tag warn">Duplicate</span>'
         stagger = f' style="--i:{pos}"' if pos < FILE_ANIMATED_ROWS else ""
         rows.append(
             f'<div class="coo-file" role="listitem"{stagger}>'
@@ -1548,91 +1676,87 @@ def _file_list_html(shown, name_counts, status_by_name, has_results):
             f'<span class="coo-file-size">{_format_size(getattr(f, "size", 0))}</span>'
             f'</div>'
         )
-    return ('<div class="coo-files" role="list" tabindex="0" aria-label="Danh sách tệp đã tải lên">'
+    return ('<div class="coo-files" role="list" tabindex="0" aria-label="Uploaded files">'
             + "".join(rows) + '</div>')
 
 
 def render_uploaded_files(files):
-    """Cho người dùng thấy ngay: ĐÃ TẢI LÊN BAO NHIÊU file và ĐÓ LÀ NHỮNG FILE NÀO (tên đầy đủ, tìm được)."""
+    """Show at a glance HOW MANY files are uploaded and WHICH files they are (full names, searchable)."""
     count = len(files)
     if not count:
-        st.markdown(
-            '<div class="coo-count empty"><span class="coo-count-icon">↑</span>'
-            '<span><span class="coo-count-label">Chưa có file nào được tải lên</span>'
-            '<span class="coo-count-meta">Kéo thả hoặc bấm Upload · chọn nhiều file cùng lúc bằng Ctrl/Shift</span></span></div>',
-            unsafe_allow_html=True,
-        )
+        _html('<div class="coo-count empty"><span class="coo-count-icon">↑</span>'
+              '<span><span class="coo-count-label">No files uploaded yet</span>'
+              '<span class="coo-count-meta">Drag and drop, or click Upload · select several files at once with Ctrl/Shift</span></span></div>')
         return
 
     total_bytes = sum(getattr(f, "size", 0) or 0 for f in files)
     name_counts = Counter(f.name for f in files)
     dup_names = [name for name, n in name_counts.items() if n > 1]
-    st.markdown(
-        '<div class="coo-count" role="status"><span class="coo-count-icon">✓</span>'
-        f'<span class="coo-count-main"><span class="coo-count-num">{count}</span>'
-        '<span class="coo-count-label">file đã tải lên</span></span>'
-        f'<span class="coo-count-meta">Tổng dung lượng {_format_size(total_bytes)}</span></div>',
-        unsafe_allow_html=True,
-    )
+    _html('<div class="coo-count" role="status"><span class="coo-count-icon">✓</span>'
+          f'<span class="coo-count-main"><span class="coo-count-num">{count}</span>'
+          f'<span class="coo-count-label">{"file" if count == 1 else "files"} uploaded</span></span>'
+          f'<span class="coo-count-meta">Total size {_format_size(total_bytes)}</span></div>')
 
-    status_by_name = {s["Tệp"]: s["Trạng thái"] for s in st.session_state.file_status}
+    status_by_name = {s[COL_FILE]: s[COL_STATUS] for s in st.session_state.file_status}
+    type_by_name = {s[COL_FILE]: s[COL_TYPE] for s in st.session_state.file_status}
     has_results = st.session_state.extracted_data is not None
-    with st.expander(f"Danh sách tệp đã tải lên ({count})", expanded=True):
-        query = ""
-        if count > FILE_SEARCH_MIN:
-            query = st.text_input(
-                "Tìm tệp", key="coo_file_search", placeholder="Tìm theo tên tệp, rồi nhấn Enter…",
-                label_visibility="collapsed", disabled=st.session_state.is_processing,
-            ).strip().lower()
-        shown = [(idx, f) for idx, f in enumerate(files, start=1) if query in f.name.lower()]
-        if query:
-            st.markdown(f'<div class="coo-hint">Khớp {len(shown)}/{count} tệp với “{html_escape(query)}”</div>',
-                        unsafe_allow_html=True)
-        if shown:
-            st.markdown(_file_list_html(shown, name_counts, status_by_name, has_results), unsafe_allow_html=True)
-        else:
-            st.markdown('<div class="coo-hint">Không có tệp nào khớp. Xóa từ khóa để xem lại toàn bộ danh sách.</div>',
-                        unsafe_allow_html=True)
+    query = ""
+    if count > FILE_SEARCH_MIN:
+        query = st.text_input(
+            "Search files", key="coo_file_search", placeholder="Search by file name, then press Enter…",
+            label_visibility="collapsed", disabled=st.session_state.is_processing,
+        ).strip().lower()
+    shown = [(idx, f) for idx, f in enumerate(files, start=1) if query in f.name.lower()]
+    summary = f"Uploaded files ({count})"
+    if query:
+        summary += f' · showing {len(shown)} matching “{html_escape(query)}”'
+    if shown:
+        body = _file_list_html(shown, name_counts, status_by_name, type_by_name, has_results)
+    else:
+        body = '<div class="coo-hint coo-details-empty">No files match. Clear the search to see the full list again.</div>'
+    _html(f'<details class="coo-details" open><summary>{summary}</summary>{body}</details>')
 
     if dup_names:
         preview = ", ".join(html_escape(n) for n in dup_names[:3]) + ("…" if len(dup_names) > 3 else "")
-        st.markdown(
-            f'<div class="coo-note"><span>⚠</span><span>{len(dup_names)} tên tệp bị tải lên trùng ({preview}). '
-            'Mỗi bản sẽ được trích xuất một lần nên Excel sẽ có dòng lặp – hãy bỏ bớt bản trùng nếu không cần.</span></div>',
-            unsafe_allow_html=True,
-        )
+        _banner("warn", "!", f"{_plural(len(dup_names), 'file name')} uploaded more than once.",
+                f"({preview}) Each copy is extracted separately, so the Excel file will contain repeated rows – "
+                "remove the extra copies if you do not need them.")
 
 
 def render_upload_card():
     with st.container(border=True, key="coo_upload"):
-        st.markdown('<div class="coo-step">Bước 1 · Nguồn dữ liệu PDF</div>', unsafe_allow_html=True)
+        _step_header(1, "Upload PDF files")
         uploaded_files = st.file_uploader(
-            "Kéo thả File vào đây", type=["pdf"], accept_multiple_files=True,
+            "Drag and drop PDF files here", type=["pdf"], accept_multiple_files=True,
             disabled=st.session_state.is_processing,
+            key=f"coo_uploader_{st.session_state.uploader_nonce}",
         )
         st.session_state.pdf_files = uploaded_files or []
         render_uploaded_files(st.session_state.pdf_files)
 
 
+# ---------- step 2: extract + start over ----------
 def render_action_card():
-    """Hành động chính duy nhất: Bắt đầu trích xuất (trở thành nút phụ khi đã có kết quả)."""
+    """The single primary action: start extraction (it becomes a secondary button once results exist)."""
     has_files = len(st.session_state.pdf_files) > 0
     has_results = st.session_state.extracted_data is not None
     with st.container(border=True, key="coo_action"):
-        st.markdown('<div class="coo-step">Bước 2 · Trích xuất</div>', unsafe_allow_html=True)
-        label = "Trích xuất lại" if has_results else "🚀 BẮT ĐẦU TRÍCH XUẤT"
+        _step_header(2, "Extract")
         start = st.button(
-            label, type="secondary" if has_results else "primary", width="stretch",
+            "Extract again" if has_results else "Start extraction",
+            icon=":material/replay:" if has_results else ":material/rocket_launch:",
+            type="secondary" if has_results else "primary", width="stretch",
             disabled=not has_files or st.session_state.is_processing,
         )
-        if not has_files:
-            st.markdown('<div class="coo-hint">Tải PDF lên ở Bước 1 để bắt đầu.</div>', unsafe_allow_html=True)
+        if st.session_state.is_processing:
+            _html('<div class="coo-hint">Extraction is running – progress is shown below.</div>')
+        elif not has_files:
+            _html('<div class="coo-hint">Upload PDF files in Step 1 to begin.</div>')
         elif has_results:
-            st.markdown('<div class="coo-hint">Đã có kết quả bên dưới. Bấm “Trích xuất lại” nếu bạn đổi danh sách file.</div>',
-                        unsafe_allow_html=True)
+            _html('<div class="coo-hint">Results are shown below. Click “Extract again” if you changed the file list.</div>')
         else:
-            st.markdown(f'<div class="coo-hint">Sẵn sàng xử lý {len(st.session_state.pdf_files)} file. '
-                        'File scan dùng OCR nên chậm hơn file có text.</div>', unsafe_allow_html=True)
+            _html(f'<div class="coo-hint">Ready to process {_plural(len(st.session_state.pdf_files), "file")}. '
+                  'Scanned files use OCR and take longer than text PDFs.</div>')
     if start:
         record_file_processing(st.session_state.session_id, len(st.session_state.pdf_files))
         reset_data_state()
@@ -1641,20 +1765,67 @@ def render_action_card():
         st.rerun()
 
 
+@st.dialog("Start over?")
+def confirm_reset_dialog():
+    n_files = len(st.session_state.pdf_files)
+    has_results = st.session_state.extracted_data is not None
+    what = _plural(n_files, "uploaded file") if n_files else "the uploaded files"
+    st.write(f"This removes {what}{' and the current results' if has_results else ''}, "
+             "so you can upload a new batch. It cannot be undone.")
+    keep, clear = st.columns(2)
+    if keep.button("Cancel", width="stretch"):
+        st.rerun()
+    if clear.button("Yes, clear everything", type="primary", width="stretch", icon=":material/restart_alt:"):
+        reset_everything()
+        st.rerun()
+
+
+def render_reset_card():
+    """Start over with a clean slate. Unavailable while an extraction is running."""
+    busy = st.session_state.is_processing
+    nothing_to_clear = not st.session_state.pdf_files and st.session_state.extracted_data is None
+    with st.container(border=True, key="coo_reset"):
+        _step_header("↻", "Start over", quiet=True)
+        if busy:
+            _html('<div class="coo-hint">Unavailable while extraction is running.</div>')
+        else:
+            _html('<div class="coo-hint">Remove all uploaded files and results to begin a new batch.</div>')
+        if st.button("Start over", icon=":material/restart_alt:", width="stretch", key="coo_reset_button",
+                     disabled=busy or nothing_to_clear):
+            confirm_reset_dialog()
+
+
+# ---------- progress ----------
+def _cancel_run():
+    # Clicking "Stop" makes Streamlit interrupt the current run; this callback runs before the next one starts.
+    st.session_state.is_processing = False
+    st.session_state.cancelled = True
+    reset_data_state()
+
+
 def run_extraction():
-    """Chạy trích xuất từng file, hiển thị tiến độ + trạng thái từng file theo thời gian thực."""
+    """Extract file by file, with live progress and a per-file status table. Always open - nothing to collapse."""
     files = [{"name": f.name, "bytes": f.getvalue()} for f in st.session_state.pdf_files]
     total = len(files)
     all_rows, errors, statuses = [], [], []
     started = time.time()
+    table_height = 38 + 35 * min(total, LIVE_TABLE_ROWS)     # fixed height: the page does not jump as rows arrive
 
-    with st.status(f"Đang trích xuất 0/{total} file…", expanded=True) as status_box:
-        st.button("Dừng", key="cancel_run", on_click=_cancel_run)
-        progress = st.progress(0.0)
+    with st.container(border=True, key="coo_progress"):
+        title_col, stop_col = st.columns([5, 1], vertical_alignment="center")
+        with title_col:
+            _html(f'<div class="coo-progress-head"><span class="coo-spinner" role="progressbar" aria-label="Extracting"></span>'
+                  f'<span class="coo-step-title">Extracting {_plural(total, "file")}…</span></div>')
+        with stop_col:
+            st.button("Stop", key="cancel_run", on_click=_cancel_run, icon=":material/stop_circle:", width="stretch")
+        progress = st.progress(0.0, text=f"0/{total} files · starting…")
         current = st.empty()
         live_table = st.empty()
+        live_table.dataframe(status_frame([], sort=False), hide_index=True, width="stretch",
+                             column_config=STATUS_COLUMN_CONFIG, height=table_height)
         for idx, f_data in enumerate(files, start=1):
-            current.markdown(f'<div class="coo-hint">Đang xử lý: <b>{f_data["name"]}</b></div>', unsafe_allow_html=True)
+            current.markdown(f'<div class="coo-hint">Now processing: <b>{html_escape(f_data["name"])}</b></div>',
+                             unsafe_allow_html=True)
             result = process_single_pdf(f_data)
             if result["error"]:
                 errors.append(result["error"])
@@ -1664,15 +1835,11 @@ def run_extraction():
 
             elapsed = time.time() - started
             eta = elapsed / idx * (total - idx)
-            progress.progress(idx / total, text=f"{idx}/{total} file · còn khoảng {int(eta // 60)} phút {int(eta % 60)} giây")
-            status_box.update(label=f"Đang trích xuất {idx}/{total} file…", expanded=True)
-            live_table.dataframe(status_frame(statuses[-8:][::-1], sort=False), hide_index=True, width="stretch",
-                                 column_config=STATUS_COLUMN_CONFIG)
+            progress.progress(idx / total, text=f"{idx}/{total} files · about {int(eta // 60)} min {int(eta % 60)} s remaining")
+            live_table.dataframe(status_frame(statuses[-LIVE_TABLE_ROWS:][::-1], sort=False), hide_index=True,
+                                 width="stretch", column_config=STATUS_COLUMN_CONFIG, height=table_height)
             del result
             gc.collect()
-        current.empty()
-        status_box.update(label=f"Hoàn tất {total} file trong {time.time() - started:.0f} giây", state="complete",
-                          expanded=False)
 
     st.session_state.extracted_data = all_rows
     st.session_state.errors = errors
@@ -1683,70 +1850,85 @@ def run_extraction():
     st.rerun()
 
 
-def _cancel_run():
-    # Bấm "Dừng" khiến Streamlit ngắt lượt chạy hiện tại; callback này chạy trước lượt chạy mới.
-    st.session_state.is_processing = False
-    st.session_state.cancelled = True
-    reset_data_state()
+# ---------- step 3: results ----------
+def render_scan_notice(statuses):
+    """Tell the user which files were scans (read with OCR) so they know which ones to double-check."""
+    scanned = [s[COL_FILE] for s in statuses if s[COL_TYPE] == TYPE_SCAN]
+    if not scanned:
+        return
+    chips = "".join(f'<span class="coo-chip">{html_escape(name)}</span>' for name in scanned)
+    _banner(
+        "info", "i",
+        f"{_plural(len(scanned), 'scanned file')} detected – please double-check {'it' if len(scanned) == 1 else 'them'}.",
+        "Scanned files have no text layer, so the dedicated OCR algorithm was applied. OCR can misread characters: "
+        "compare the extracted values with the original PDF before using them."
+        f'<div class="coo-chips" role="list" aria-label="Scanned files">{chips}</div>',
+    )
 
 
 def render_results():
     rows = st.session_state.extracted_data
     statuses = st.session_state.file_status
-    n_ok = sum(1 for s in statuses if s["Trạng thái"] == STATUS_OK)
-    n_warn = sum(1 for s in statuses if s["Trạng thái"] == STATUS_WARN)
-    n_err = sum(1 for s in statuses if s["Trạng thái"] == STATUS_ERR)
+    n_ok = sum(1 for s in statuses if s[COL_STATUS] == STATUS_OK)
+    n_warn = sum(1 for s in statuses if s[COL_STATUS] == STATUS_WARN)
+    n_err = sum(1 for s in statuses if s[COL_STATUS] == STATUS_ERR)
 
     with st.container(border=True, key="coo_results"):
-        st.markdown('<div class="coo-step">Bước 3 · Kết quả & xuất file</div>', unsafe_allow_html=True)
-        c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1, 1.6], vertical_alignment="bottom")
-        c1.metric("Thành công", n_ok)
-        c2.metric("Cảnh báo", n_warn)
-        c3.metric("Lỗi", n_err)
-        c4.metric("Dòng dữ liệu", len(rows))
+        _step_header(3, "Results & export")
+        c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1, 1.6], vertical_alignment="center")
+        c1.metric("Successful", n_ok)
+        c2.metric("Warnings", n_warn)
+        c3.metric("Errors", n_err)
+        c4.metric("Data rows", len(rows))
         with c5:
             if st.session_state.excel_bytes:
                 st.download_button(
-                    label="📥 TẢI FILE EXCEL (.XLSX)", data=st.session_state.excel_bytes,
+                    label="Download Excel (.xlsx)", data=st.session_state.excel_bytes, icon=":material/download:",
                     file_name="Decathlon_Data.xlsx", type="primary", width="stretch",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
             else:
-                st.button("📥 TẢI FILE EXCEL", disabled=True, width="stretch")
-            st.markdown(f'<div class="coo-hint">Xử lý {len(statuses)} file trong {st.session_state.run_seconds:.0f} giây.</div>',
-                        unsafe_allow_html=True)
+                st.button("Download Excel (.xlsx)", icon=":material/download:", disabled=True, width="stretch")
+            _html(f'<div class="coo-hint">Processed {_plural(len(statuses), "file")} in {st.session_state.run_seconds:.0f} seconds.</div>')
 
         if n_err:
-            st.error(f"{n_err} file không trích xuất được. Xem cột “Ghi chú” trong tab Trạng thái để biết lý do và cách xử lý.")
-        elif n_warn:
-            st.warning(f"{n_warn} file có ô cần kiểm tra lại (để trống hoặc lấy giá trị thay thế). Xem tab Trạng thái.")
+            _banner("err", "!", f"{_plural(n_err, 'file')} could not be extracted.",
+                    "See the “Notes” column in the File status tab for the reason and how to fix it.")
+        if n_warn:
+            _banner("warn", "!", f"{_plural(n_warn, 'file')} {'has' if n_warn == 1 else 'have'} cells that need a second look.",
+                    "A value was left blank or filled from a fallback source. See the File status tab.")
+        render_scan_notice(statuses)
 
-        status_tab = f"Trạng thái từng file ({len(statuses)})"
-        data_tab = f"Dữ liệu chi tiết ({len(rows)} dòng)"
+        status_tab = f"File status ({len(statuses)})"
+        data_tab = f"Extracted data ({_plural(len(rows), 'row')})"
         tab_names = [status_tab, data_tab] if (n_err or n_warn) else [data_tab, status_tab]
         tabs = dict(zip(tab_names, st.tabs(tab_names)))
         with tabs[status_tab]:
             df_status = status_frame(statuses)
             st.dataframe(df_status, hide_index=True, width="stretch", column_config=STATUS_COLUMN_CONFIG,
                          height=min(420, 38 + 35 * max(len(df_status), 1)))
-            warn_rows = [s for s in statuses if s["Chi tiết cảnh báo"]]
+            warn_rows = [s for s in statuses if s[COL_DETAILS]]
             if warn_rows:
-                with st.expander("Xem toàn bộ cảnh báo"):
-                    for s in warn_rows:
-                        st.markdown(f"**{s['Tệp']}**")
-                        st.text(s["Chi tiết cảnh báo"])
+                items = "".join(
+                    f'<div class="coo-warn-file">{html_escape(s[COL_FILE])}</div>'
+                    f'<div class="coo-warn-text">{html_escape(s[COL_DETAILS]).replace(chr(10), "<br>")}</div>'
+                    for s in warn_rows
+                )
+                _html(f'<details class="coo-details"><summary>View all warnings ({_plural(len(warn_rows), "file")})</summary>'
+                      f'<div class="coo-warn-list">{items}</div></details>')
         with tabs[data_tab]:
             if rows:
                 st.dataframe(pd.DataFrame(rows, columns=COLUMNS), width="stretch", height=450)
             else:
-                st.info("Chưa có dòng dữ liệu nào. Kiểm tra tab Trạng thái để biết lý do.")
+                st.info("No data rows yet. Check the File status tab for the reason.")
 
 
+# ---------- page ----------
 def main():
     st.set_page_config(page_title="PDF Extract to Excel", layout="wide", page_icon="📑")
     init_session_state()
 
-    # Ghi nhận ngay khi truy cập web lần đầu trong phiên
+    # Record the visit once per session
     if not st.session_state.has_recorded_access:
         record_access(st.session_state.session_id)
         st.session_state.has_recorded_access = True
@@ -1757,9 +1939,11 @@ def main():
         render_upload_card()
     with right:
         render_action_card()
+        render_reset_card()
 
     if st.session_state.cancelled:
-        st.info("Đã dừng trích xuất. Kết quả dở dang đã được bỏ qua – bấm “Bắt đầu trích xuất” để chạy lại.")
+        _banner("info", "i", "Extraction stopped.",
+                "Partial results were discarded – click “Start extraction” to run again.")
         st.session_state.cancelled = False
 
     if st.session_state.is_processing:
